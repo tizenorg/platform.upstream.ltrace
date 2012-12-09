@@ -40,26 +40,6 @@ export CFLAGS="%{optflags} -W -Wall"
 	    --build=%{_target_cpu}-tizen-linux
 %endif
 make
-%if 1
-if make check
-then
-	echo 'no make check errors' > testresults.txt
-else
-	for file in `find testsuite -name "*.ltrace"`
-	do
-		echo
-		echo $file
-		echo
-		cat $file
-		echo
-	done >> testresults.txt
-fi
-mv testresults.txt %{_target_cpu}-testresults.txt
-ln testsuite/testrun.sum testsuite/%{_target_cpu}-testrun.sum
-%else
-echo no make check > %{_target_cpu}-testresults.txt
-echo no make check > testsuite/%{_target_cpu}-testrun.sum
-%endif
 
 %install
 make install DESTDIR=%{buildroot}
@@ -67,7 +47,7 @@ rm -rf %{buildroot}/usr/share/doc/ltrace
 
 %files
 %defattr(-,root,root)
-%doc COPYING README ChangeLog %{_target_cpu}-testresults.txt testsuite/%{_target_cpu}-testrun.sum
+%doc COPYING README 
 %{_bindir}/ltrace
 %{_mandir}/man1/ltrace.1.gz
 %config /etc/ltrace.conf
