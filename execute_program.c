@@ -1,4 +1,30 @@
+/*
+ * This file is part of ltrace.
+ * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2010 Joe Damato
+ * Copyright (C) 1998,1999,2003,2008,2009 Juan Cespedes
+ * Copyright (C) 2006 Ian Wienand
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
+ * 02110-1301 USA
+ */
 #include "config.h"
+
+#if defined(HAVE_LIBUNWIND)
+#include <libunwind-ptrace.h>
+#endif /* defined(HAVE_LIBUNWIND) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,10 +36,13 @@
 #include <pwd.h>
 #include <grp.h>
 
-#include "common.h"
+#include "backend.h"
+#include "options.h"
+#include "debug.h"
 
 static void
-change_uid(Process *proc) {
+change_uid(const char * command)
+{
 	uid_t run_uid, run_euid;
 	gid_t run_gid, run_egid;
 
@@ -45,7 +74,7 @@ change_uid(Process *proc) {
 		run_euid = run_uid;
 		run_egid = run_gid;
 
-		if (!stat(proc->filename, &statbuf)) {
+		if (!stat(command, &statbuf)) {
 			if (statbuf.st_mode & S_ISUID) {
 				run_euid = statbuf.st_uid;
 			}
@@ -64,28 +93,30 @@ change_uid(Process *proc) {
 	}
 }
 
-void
-execute_program(Process *sp, char **argv) {
+pid_t
+execute_program(const char * command, char **argv)
+{
 	pid_t pid;
 
-	debug(1, "Executing `%s'...", sp->filename);
+	debug(1, "Executing `%s'...", command);
 
 	pid = fork();
 	if (pid < 0) {
+	fail:
 		perror("ltrace: fork");
 		exit(1);
 	} else if (!pid) {	/* child */
-		change_uid(sp);
+		change_uid(command);
 		trace_me();
-		execvp(sp->filename, argv);
-		fprintf(stderr, "Can't execute `%s': %s\n", sp->filename,
+		execvp(command, argv);
+		fprintf(stderr, "Can't execute `%s': %s\n", command,
 			strerror(errno));
 		_exit(1);
 	}
 
+	if (wait_for_proc(pid) < 0)
+		goto fail;
+
 	debug(1, "PID=%d", pid);
-
-	sp->pid = pid;
-
-	return;
+	return pid;
 }

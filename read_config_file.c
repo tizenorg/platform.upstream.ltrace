@@ -1,95 +1,108 @@
+/*
+ * This file is part of ltrace.
+ * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 1998,1999,2003,2007,2008,2009 Juan Cespedes
+ * Copyright (C) 2006 Ian Wienand
+ * Copyright (C) 2006 Steve Fink
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
+ * 02110-1301 USA
+ */
+
 #include "config.h"
 
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <errno.h>
+#include <error.h>
+#include <assert.h>
 
 #include "common.h"
+#include "output.h"
+#include "expr.h"
+#include "param.h"
+#include "printf.h"
+#include "zero.h"
+#include "type.h"
+#include "lens.h"
+#include "lens_default.h"
+#include "lens_enum.h"
 
 static int line_no;
 static char *filename;
-static int error_count = 0;
+struct typedef_node_t;
 
-static arg_type_info *parse_type(char **str);
+static struct arg_type_info *parse_nonpointer_type(char **str,
+						   struct param **extra_param,
+						   size_t param_num, int *ownp,
+						   struct typedef_node_t *td);
+static struct arg_type_info *parse_type(char **str, struct param **extra_param,
+					size_t param_num, int *ownp,
+					struct typedef_node_t *in_typedef);
+static struct arg_type_info *parse_lens(char **str, struct param **extra_param,
+					size_t param_num, int *ownp,
+					struct typedef_node_t *in_typedef);
+static int parse_enum(char **str, struct arg_type_info **retp, int *ownp);
 
 Function *list_of_functions = NULL;
 
-/* Map of strings to type names. These do not need to be in any
- * particular order */
-static struct list_of_pt_t {
-	char *name;
-	enum arg_type pt;
-} list_of_pt[] = {
-	{
-	"void", ARGTYPE_VOID}, {
-	"int", ARGTYPE_INT}, {
-	"uint", ARGTYPE_UINT}, {
-	"long", ARGTYPE_LONG}, {
-	"ulong", ARGTYPE_ULONG}, {
-	"octal", ARGTYPE_OCTAL}, {
-	"char", ARGTYPE_CHAR}, {
-	"short", ARGTYPE_SHORT}, {
-	"ushort", ARGTYPE_USHORT}, {
-	"float", ARGTYPE_FLOAT}, {
-	"double", ARGTYPE_DOUBLE}, {
-	"addr", ARGTYPE_ADDR}, {
-	"file", ARGTYPE_FILE}, {
-	"format", ARGTYPE_FORMAT}, {
-	"string", ARGTYPE_STRING}, {
-	"array", ARGTYPE_ARRAY}, {
-	"struct", ARGTYPE_STRUCT}, {
-	"enum", ARGTYPE_ENUM}, {
-	NULL, ARGTYPE_UNKNOWN}	/* Must finish with NULL */
-};
+static int
+parse_arg_type(char **name, enum arg_type *ret)
+{
+	char *rest = NULL;
+	enum arg_type candidate;
 
-/* Array of prototype objects for each of the types. The order in this
- * array must exactly match the list of enumerated values in
- * common.h */
-static arg_type_info arg_type_prototypes[] = {
-	{ ARGTYPE_VOID },
-	{ ARGTYPE_INT },
-	{ ARGTYPE_UINT },
-	{ ARGTYPE_LONG },
-	{ ARGTYPE_ULONG },
-	{ ARGTYPE_OCTAL },
-	{ ARGTYPE_CHAR },
-	{ ARGTYPE_SHORT },
-	{ ARGTYPE_USHORT },
-	{ ARGTYPE_FLOAT },
-	{ ARGTYPE_DOUBLE },
-	{ ARGTYPE_ADDR },
-	{ ARGTYPE_FILE },
-	{ ARGTYPE_FORMAT },
-	{ ARGTYPE_STRING },
-	{ ARGTYPE_STRING_N },
-	{ ARGTYPE_ARRAY },
-	{ ARGTYPE_ENUM },
-	{ ARGTYPE_STRUCT },
-	{ ARGTYPE_POINTER },
-	{ ARGTYPE_UNKNOWN }
-};
+#define KEYWORD(KWD, TYPE)						\
+	do {								\
+		if (strncmp(*name, KWD, sizeof(KWD) - 1) == 0) {	\
+			rest = *name + sizeof(KWD) - 1;			\
+			candidate = TYPE;				\
+			goto ok;					\
+		}							\
+	} while (0)
 
-arg_type_info *
-lookup_prototype(enum arg_type at) {
-	if (at >= 0 && at <= ARGTYPE_COUNT)
-		return &arg_type_prototypes[at];
-	else
-		return &arg_type_prototypes[ARGTYPE_COUNT]; /* UNKNOWN */
-}
+	KEYWORD("void", ARGTYPE_VOID);
+	KEYWORD("int", ARGTYPE_INT);
+	KEYWORD("uint", ARGTYPE_UINT);
+	KEYWORD("long", ARGTYPE_LONG);
+	KEYWORD("ulong", ARGTYPE_ULONG);
+	KEYWORD("char", ARGTYPE_CHAR);
+	KEYWORD("short", ARGTYPE_SHORT);
+	KEYWORD("ushort", ARGTYPE_USHORT);
+	KEYWORD("float", ARGTYPE_FLOAT);
+	KEYWORD("double", ARGTYPE_DOUBLE);
+	KEYWORD("array", ARGTYPE_ARRAY);
+	KEYWORD("struct", ARGTYPE_STRUCT);
 
-static arg_type_info *
-str2type(char **str) {
-	struct list_of_pt_t *tmp = &list_of_pt[0];
+	/* Misspelling of int used in ltrace.conf that we used to
+	 * ship.  */
+	KEYWORD("itn", ARGTYPE_INT);
 
-	while (tmp->name) {
-		if (!strncmp(*str, tmp->name, strlen(tmp->name))
-				&& index(" ,()#*;012345[", *(*str + strlen(tmp->name)))) {
-			*str += strlen(tmp->name);
-			return lookup_prototype(tmp->pt);
-		}
-		tmp++;
-	}
-	return lookup_prototype(ARGTYPE_UNKNOWN);
+	assert(rest == NULL);
+	return -1;
+
+#undef KEYWORD
+
+ok:
+	if (isalnum(*rest))
+		return -1;
+
+	*name = rest;
+	*ret = candidate;
+	return 0;
 }
 
 static void
@@ -102,6 +115,10 @@ eat_spaces(char **str) {
 static char *
 xstrndup(char *str, size_t len) {
 	char *ret = (char *) malloc(len + 1);
+	if (ret == NULL) {
+		report_global_error("malloc: %s", strerror(errno));
+		return NULL;
+	}
 	strncpy(ret, str, len);
 	ret[len] = 0;
 	return ret;
@@ -111,10 +128,8 @@ static char *
 parse_ident(char **str) {
 	char *ident = *str;
 
-	if (!isalnum(**str) && **str != '_') {
-		output_line(0, "Syntax error in `%s', line %d: Bad identifier",
-				filename, line_no);
-		error_count++;
+	if (!isalpha(**str) && **str != '_') {
+		report_error(filename, line_no, "bad identifier");
 		return NULL;
 	}
 
@@ -158,473 +173,1023 @@ start_of_arg_sig(char *str) {
 }
 
 static int
-parse_int(char **str) {
+parse_int(char **str, long *ret)
+{
 	char *end;
 	long n = strtol(*str, &end, 0);
 	if (end == *str) {
-		output_line(0, "Syntax error in `%s', line %d: Bad number (%s)",
-				filename, line_no, *str);
-		error_count++;
-		return 0;
+		report_error(filename, line_no, "bad number");
+		return -1;
 	}
 
 	*str = end;
-	return n;
+	if (ret != NULL)
+		*ret = n;
+	return 0;
+}
+
+static int
+check_nonnegative(long l)
+{
+	if (l < 0) {
+		report_error(filename, line_no,
+			     "expected non-negative value, got %ld", l);
+		return -1;
+	}
+	return 0;
+}
+
+static int
+check_int(long l)
+{
+	int i = l;
+	if ((long)i != l) {
+		report_error(filename, line_no,
+			     "Number too large: %ld", l);
+		return -1;
+	}
+	return 0;
+}
+
+static int
+parse_char(char **str, char expected)
+{
+	if (**str != expected) {
+		report_error(filename, line_no,
+			     "expected '%c', got '%c'", expected, **str);
+		return -1;
+	}
+
+	++*str;
+	return 0;
+}
+
+static struct expr_node *parse_argnum(char **str, int *ownp, int zero);
+
+static struct expr_node *
+parse_zero(char **str, struct expr_node *ret, int *ownp)
+{
+	eat_spaces(str);
+	if (**str == '(') {
+		++*str;
+		int own;
+		struct expr_node *arg = parse_argnum(str, &own, 0);
+		if (arg == NULL)
+			return NULL;
+		if (parse_char(str, ')') < 0) {
+		fail:
+			expr_destroy(arg);
+			free(arg);
+			return NULL;
+		}
+
+		struct expr_node *ret = build_zero_w_arg(arg, own);
+		if (ret == NULL)
+			goto fail;
+		*ownp = 1;
+		return ret;
+
+	} else {
+		free(ret);
+		*ownp = 0;
+		return expr_node_zero();
+	}
+}
+
+static int
+wrap_in_zero(struct expr_node **nodep)
+{
+	struct expr_node *n = build_zero_w_arg(*nodep, 1);
+	if (n == NULL)
+		return -1;
+	*nodep = n;
+	return 0;
 }
 
 /*
  * Input:
- *  argN   : The value of argument #N, counting from 1 (arg0 = retval)
+ *  argN   : The value of argument #N, counting from 1
  *  eltN   : The value of element #N of the containing structure
  *  retval : The return value
- *  0      : Error
- *  N      : The numeric value N, if N > 0
- *
- * Output:
- * > 0   actual numeric value
- * = 0   return value
- * < 0   (arg -n), counting from one
+ *  N      : The numeric value N
  */
-static int
-parse_argnum(char **str) {
-	int multiplier = 1;
-	int n = 0;
+static struct expr_node *
+parse_argnum(char **str, int *ownp, int zero)
+{
+	struct expr_node *expr = malloc(sizeof(*expr));
+	if (expr == NULL)
+		return NULL;
 
-	if (strncmp(*str, "arg", 3) == 0) {
-		(*str) += 3;
-		multiplier = -1;
-	} else if (strncmp(*str, "elt", 3) == 0) {
-		(*str) += 3;
-		multiplier = -1;
-	} else if (strncmp(*str, "retval", 6) == 0) {
-		(*str) += 6;
-		return 0;
+	if (isdigit(**str)) {
+		long l;
+		if (parse_int(str, &l) < 0
+		    || check_nonnegative(l) < 0
+		    || check_int(l) < 0)
+			goto fail;
+
+		expr_init_const_word(expr, l, type_get_simple(ARGTYPE_LONG), 0);
+
+		if (zero && wrap_in_zero(&expr) < 0)
+			goto fail;
+
+		*ownp = 1;
+		return expr;
+
+	} else {
+		char *const name = parse_ident(str);
+		if (name == NULL) {
+		fail_ident:
+			free(name);
+			goto fail;
+		}
+
+		int is_arg = strncmp(name, "arg", 3) == 0;
+		if (is_arg || strncmp(name, "elt", 3) == 0) {
+			long l;
+			char *num = name + 3;
+			if (parse_int(&num, &l) < 0 || check_int(l) < 0)
+				goto fail_ident;
+
+			if (is_arg) {
+				if (l == 0)
+					expr_init_named(expr, "retval", 0);
+				else
+					expr_init_argno(expr, l - 1);
+			} else {
+				struct expr_node *e_up = malloc(sizeof(*e_up));
+				struct expr_node *e_ix = malloc(sizeof(*e_ix));
+				if (e_up == NULL || e_ix == NULL) {
+					free(e_up);
+					free(e_ix);
+					goto fail_ident;
+				}
+
+				expr_init_up(e_up, expr_self(), 0);
+				struct arg_type_info *ti
+					= type_get_simple(ARGTYPE_LONG);
+				expr_init_const_word(e_ix, l - 1, ti, 0);
+				expr_init_index(expr, e_up, 1, e_ix, 1);
+			}
+
+		} else if (strcmp(name, "retval") == 0) {
+			expr_init_named(expr, "retval", 0);
+
+		} else if (strcmp(name, "zero") == 0) {
+			struct expr_node *ret = parse_zero(str, expr, ownp);
+			if (ret == NULL)
+				goto fail_ident;
+			return ret;
+
+		} else {
+			report_error(filename, line_no,
+				     "Unknown length specifier: '%s'", name);
+			goto fail_ident;
+		}
+
+		if (zero && wrap_in_zero(&expr) < 0)
+			goto fail_ident;
+
+		free(name);
+		*ownp = 1;
+		return expr;
 	}
 
-	n = parse_int(str);
-
-	return n * multiplier;
+fail:
+	free(expr);
+	return NULL;
 }
 
 struct typedef_node_t {
 	char *name;
-	arg_type_info *info;
+	struct arg_type_info *info;
+	int own_type;
+	int forward : 1;
 	struct typedef_node_t *next;
 } *typedefs = NULL;
 
-static arg_type_info *
-lookup_typedef(char **str) {
+static struct typedef_node_t *
+lookup_typedef(const char *name)
+{
 	struct typedef_node_t *node;
+	for (node = typedefs; node != NULL; node = node->next)
+		if (strcmp(name, node->name) == 0)
+			return node;
+	return NULL;
+}
+
+static struct arg_type_info *
+parse_typedef_name(char **str)
+{
 	char *end = *str;
 	while (*end && (isalnum(*end) || *end == '_'))
 		++end;
 	if (end == *str)
 		return NULL;
 
-	for (node = typedefs; node != NULL; node = node->next) {
-		if (strncmp(*str, node->name, end - *str) == 0) {
-			(*str) += strlen(node->name);
-			return node->info;
+	size_t len = end - *str;
+	char buf[len + 1];
+	memcpy(buf, *str, len);
+	*str += len;
+	buf[len] = 0;
+
+	struct typedef_node_t *td = lookup_typedef(buf);
+	if (td == NULL)
+		return NULL;
+	return td->info;
+}
+
+static void
+insert_typedef(struct typedef_node_t *td)
+{
+	if (td == NULL)
+		return;
+	td->next = typedefs;
+	typedefs = td;
+}
+
+static struct typedef_node_t *
+new_typedef(char *name, struct arg_type_info *info, int own_type)
+{
+	struct typedef_node_t *binding = malloc(sizeof(*binding));
+	binding->name = name;
+	binding->info = info;
+	binding->own_type = own_type;
+	binding->forward = 0;
+	binding->next = NULL;
+	return binding;
+}
+
+static void
+parse_typedef(char **str)
+{
+	(*str) += strlen("typedef");
+	eat_spaces(str);
+	char *name = parse_ident(str);
+
+	/* Look through the typedef list whether we already have a
+	 * forward of this type.  If we do, it must be forward
+	 * structure.  */
+	struct typedef_node_t *forward = lookup_typedef(name);
+	if (forward != NULL
+	    && (forward->info->type != ARGTYPE_STRUCT
+		|| !forward->forward)) {
+		report_error(filename, line_no,
+			     "Redefinition of typedef '%s'", name);
+		free(name);
+		return;
+	}
+
+	// Skip = sign
+	eat_spaces(str);
+	if (parse_char(str, '=') < 0) {
+		free(name);
+		return;
+	}
+	eat_spaces(str);
+
+	struct typedef_node_t *this_td = new_typedef(name, NULL, 0);
+	this_td->info = parse_lens(str, NULL, 0, &this_td->own_type, this_td);
+
+	if (this_td->info == NULL) {
+		free(this_td);
+		free(name);
+		return;
+	}
+
+	if (forward == NULL) {
+		insert_typedef(this_td);
+		return;
+	}
+
+	/* If we are defining a forward, make sure the definition is a
+	 * structure as well.  */
+	if (this_td->info->type != ARGTYPE_STRUCT) {
+		report_error(filename, line_no,
+			     "Definition of forward '%s' must be a structure.",
+			     name);
+		if (this_td->own_type) {
+			type_destroy(this_td->info);
+			free(this_td->info);
+		}
+		free(this_td);
+		free(name);
+		return;
+	}
+
+	/* Now move guts of the actual type over to the
+	 * forward type.  We can't just move pointers around,
+	 * because references to forward must stay intact.  */
+	assert(this_td->own_type);
+	type_destroy(forward->info);
+	*forward->info = *this_td->info;
+	forward->forward = 0;
+	free(this_td->info);
+	free(name);
+	free(this_td);
+}
+
+static void
+destroy_fun(Function *fun)
+{
+	size_t i;
+	if (fun == NULL)
+		return;
+	if (fun->own_return_info) {
+		type_destroy(fun->return_info);
+		free(fun->return_info);
+	}
+	for (i = 0; i < fun->num_params; ++i)
+		param_destroy(&fun->params[i]);
+	free(fun->params);
+}
+
+/* Syntax: struct ( type,type,type,... ) */
+static int
+parse_struct(char **str, struct arg_type_info *info,
+	     struct typedef_node_t *in_typedef)
+{
+	eat_spaces(str);
+
+	if (**str == ';') {
+		if (in_typedef == NULL) {
+			report_error(filename, line_no,
+				     "Forward struct can be declared only "
+				     "directly after a typedef.");
+			return -1;
+		}
+
+		/* Forward declaration is currently handled as an
+		 * empty struct.  */
+		type_init_struct(info);
+		in_typedef->forward = 1;
+		return 0;
+	}
+
+	if (parse_char(str, '(') < 0)
+		return -1;
+
+	eat_spaces(str); // Empty arg list with whitespace inside
+
+	type_init_struct(info);
+
+	while (1) {
+		eat_spaces(str);
+		if (**str == 0 || **str == ')') {
+			parse_char(str, ')');
+			return 0;
+		}
+
+		/* Field delimiter.  */
+		if (type_struct_size(info) > 0)
+			parse_char(str, ',');
+
+		eat_spaces(str);
+		int own;
+		struct arg_type_info *field = parse_lens(str, NULL, 0, &own,
+							 NULL);
+		if (field == NULL || type_struct_add(info, field, own)) {
+			type_destroy(info);
+			return -1;
 		}
 	}
+}
+
+static int
+parse_string(char **str, struct arg_type_info **retp, int *ownp)
+{
+	struct arg_type_info *info = malloc(sizeof(*info) * 2);
+	if (info == NULL) {
+	fail:
+		free(info);
+		return -1;
+	}
+
+	struct expr_node *length;
+	int own_length;
+	int with_arg = 0;
+
+	if (isdigit(**str)) {
+		/* string0 is string[retval], length is zero(retval)
+		 * stringN is string[argN], length is zero(argN) */
+		long l;
+		if (parse_int(str, &l) < 0
+		    || check_int(l) < 0)
+			goto fail;
+
+		struct expr_node *length_arg = malloc(sizeof(*length_arg));
+		if (length_arg == NULL)
+			goto fail;
+
+		if (l == 0)
+			expr_init_named(length_arg, "retval", 0);
+		else
+			expr_init_argno(length_arg, l - 1);
+
+		length = build_zero_w_arg(length_arg, 1);
+		if (length == NULL) {
+			expr_destroy(length_arg);
+			free(length_arg);
+			goto fail;
+		}
+		own_length = 1;
+
+	} else {
+		eat_spaces(str);
+		if (**str == '[') {
+			(*str)++;
+			eat_spaces(str);
+
+			length = parse_argnum(str, &own_length, 1);
+			if (length == NULL)
+				goto fail;
+
+			eat_spaces(str);
+			parse_char(str, ']');
+
+		} else if (**str == '(') {
+			/* Usage of "string" as lens.  */
+			++*str;
+
+			free(info);
+
+			eat_spaces(str);
+			info = parse_type(str, NULL, 0, ownp, NULL);
+			if (info == NULL)
+				goto fail;
+
+			eat_spaces(str);
+			parse_char(str, ')');
+
+			with_arg = 1;
+
+		} else {
+			/* It was just a simple string after all.  */
+			length = expr_node_zero();
+			own_length = 0;
+		}
+	}
+
+	/* String is a pointer to array of chars.  */
+	if (!with_arg) {
+		type_init_array(&info[1], type_get_simple(ARGTYPE_CHAR), 0,
+				length, own_length);
+
+		type_init_pointer(&info[0], &info[1], 0);
+		*ownp = 1;
+	}
+
+	info->lens = &string_lens;
+	info->own_lens = 0;
+
+	*retp = info;
+	return 0;
+}
+
+static int
+build_printf_pack(struct param **packp, size_t param_num)
+{
+	if (packp == NULL) {
+		report_error(filename, line_no,
+			     "'format' type in unexpected context");
+		return -1;
+	}
+	if (*packp != NULL) {
+		report_error(filename, line_no,
+			     "only one 'format' type per function supported");
+		return -1;
+	}
+
+	*packp = malloc(sizeof(**packp));
+	if (*packp == NULL)
+		return -1;
+
+	struct expr_node *node = malloc(sizeof(*node));
+	if (node == NULL) {
+		free(*packp);
+		return -1;
+	}
+
+	expr_init_argno(node, param_num);
+
+	param_pack_init_printf(*packp, node, 1);
+
+	return 0;
+}
+
+/* Match and consume KWD if it's next in stream, and return 0.
+ * Otherwise return negative number.  */
+static int
+try_parse_kwd(char **str, const char *kwd)
+{
+	size_t len = strlen(kwd);
+	if (strncmp(*str, kwd, len) == 0
+	    && !isalnum((*str)[len])) {
+		(*str) += len;
+		return 0;
+	}
+	return -1;
+}
+
+/* Make a copy of INFO and set the *OWN bit if it's not already
+ * owned.  */
+static int
+unshare_type_info(struct arg_type_info **infop, int *ownp)
+{
+	if (*ownp)
+		return 0;
+
+	struct arg_type_info *ninfo = malloc(sizeof(*ninfo));
+	if (ninfo == NULL) {
+		report_error(filename, line_no,
+			     "malloc: %s", strerror(errno));
+		return -1;
+	}
+	*ninfo = **infop;
+	*infop = ninfo;
+	*ownp = 1;
+	return 0;
+}
+
+/* XXX extra_param and param_num are a kludge to get in
+ * backward-compatible support for "format" parameter type.  The
+ * latter is only valid if the former is non-NULL, which is only in
+ * top-level context.  */
+static int
+parse_alias(char **str, struct arg_type_info **retp, int *ownp,
+	    struct param **extra_param, size_t param_num)
+{
+	/* For backward compatibility, we need to support things like
+	 * stringN (which is like string[argN], string[N], and also
+	 * bare string.  We might, in theory, replace this by
+	 * preprocessing configure file sources with M4, but for now,
+	 * "string" is syntax.  */
+	if (strncmp(*str, "string", 6) == 0) {
+		(*str) += 6;
+		return parse_string(str, retp, ownp);
+
+	} else if (try_parse_kwd(str, "format") >= 0
+		   && extra_param != NULL) {
+		/* For backward compatibility, format is parsed as
+		 * "string", but it smuggles to the parameter list of
+		 * a function a "printf" argument pack with this
+		 * parameter as argument.  */
+		if (parse_string(str, retp, ownp) < 0)
+			return -1;
+
+		return build_printf_pack(extra_param, param_num);
+
+	} else if (try_parse_kwd(str, "enum") >=0) {
+
+		return parse_enum(str, retp, ownp);
+
+	} else {
+		*retp = NULL;
+		return 0;
+	}
+}
+
+/* Syntax: array ( type, N|argN ) */
+static int
+parse_array(char **str, struct arg_type_info *info)
+{
+	eat_spaces(str);
+	if (parse_char(str, '(') < 0)
+		return -1;
+
+	eat_spaces(str);
+	int own;
+	struct arg_type_info *elt_info = parse_lens(str, NULL, 0, &own, NULL);
+	if (elt_info == NULL)
+		return -1;
+
+	eat_spaces(str);
+	parse_char(str, ',');
+
+	eat_spaces(str);
+	int own_length;
+	struct expr_node *length = parse_argnum(str, &own_length, 0);
+	if (length == NULL) {
+		if (own) {
+			type_destroy(elt_info);
+			free(elt_info);
+		}
+		return -1;
+	}
+
+	type_init_array(info, elt_info, own, length, own_length);
+
+	eat_spaces(str);
+	parse_char(str, ')');
+	return 0;
+}
+
+/* Syntax:
+ *   enum (keyname[=value],keyname[=value],... )
+ *   enum<type> (keyname[=value],keyname[=value],... )
+ */
+static int
+parse_enum(char **str, struct arg_type_info **retp, int *ownp)
+{
+	/* Optional type argument.  */
+	eat_spaces(str);
+	if (**str == '[') {
+		parse_char(str, '[');
+		eat_spaces(str);
+		*retp = parse_nonpointer_type(str, NULL, 0, ownp, 0);
+		if (*retp == NULL)
+			return -1;
+
+		if (!type_is_integral((*retp)->type)) {
+			report_error(filename, line_no,
+				     "integral type required as enum argument");
+		fail:
+			if (*ownp) {
+				/* This also releases associated lens
+				 * if any was set so far.  */
+				type_destroy(*retp);
+				free(*retp);
+			}
+			return -1;
+		}
+
+		eat_spaces(str);
+		if (parse_char(str, ']') < 0)
+			goto fail;
+
+	} else {
+		*retp = type_get_simple(ARGTYPE_INT);
+		*ownp = 0;
+	}
+
+	/* We'll need to set the lens, so unshare.  */
+	if (unshare_type_info(retp, ownp) < 0)
+		goto fail;
+
+	eat_spaces(str);
+	if (parse_char(str, '(') < 0)
+		goto fail;
+
+	struct enum_lens *lens = malloc(sizeof(*lens));
+	if (lens == NULL) {
+		report_error(filename, line_no,
+			     "malloc enum lens: %s", strerror(errno));
+		return -1;
+	}
+
+	lens_init_enum(lens);
+	(*retp)->lens = &lens->super;
+	(*retp)->own_lens = 1;
+
+	long last_val = 0;
+	while (1) {
+		eat_spaces(str);
+		if (**str == 0 || **str == ')') {
+			parse_char(str, ')');
+			return 0;
+		}
+
+		/* Field delimiter.  XXX should we support the C
+		 * syntax, where the enumeration can end in pending
+		 * comma?  */
+		if (lens_enum_size(lens) > 0)
+			parse_char(str, ',');
+
+		eat_spaces(str);
+		char *key = parse_ident(str);
+		if (key == NULL) {
+		err:
+			free(key);
+			goto fail;
+		}
+
+		if (**str == '=') {
+			++*str;
+			eat_spaces(str);
+			if (parse_int(str, &last_val) < 0)
+				goto err;
+		}
+
+		struct value *value = malloc(sizeof(*value));
+		if (value == NULL)
+			goto err;
+		value_init_detached(value, NULL, *retp, 0);
+		value_set_word(value, last_val);
+
+		if (lens_enum_add(lens, key, 1, value, 1) < 0)
+			goto err;
+
+		last_val++;
+	}
+
+	return 0;
+}
+
+static struct arg_type_info *
+parse_nonpointer_type(char **str, struct param **extra_param, size_t param_num,
+		      int *ownp, struct typedef_node_t *in_typedef)
+{
+	enum arg_type type;
+	if (parse_arg_type(str, &type) < 0) {
+		struct arg_type_info *simple;
+		if (parse_alias(str, &simple, ownp, extra_param, param_num) < 0)
+			return NULL;
+		if (simple == NULL)
+			simple = parse_typedef_name(str);
+		if (simple != NULL) {
+			*ownp = 0;
+			return simple;
+		}
+
+		report_error(filename, line_no,
+			     "unknown type around '%s'", *str);
+		return NULL;
+	}
+
+	/* For some types that's all we need.  */
+	switch (type) {
+	case ARGTYPE_VOID:
+	case ARGTYPE_INT:
+	case ARGTYPE_UINT:
+	case ARGTYPE_LONG:
+	case ARGTYPE_ULONG:
+	case ARGTYPE_CHAR:
+	case ARGTYPE_SHORT:
+	case ARGTYPE_USHORT:
+	case ARGTYPE_FLOAT:
+	case ARGTYPE_DOUBLE:
+		*ownp = 0;
+		return type_get_simple(type);
+
+	case ARGTYPE_ARRAY:
+	case ARGTYPE_STRUCT:
+		break;
+
+	case ARGTYPE_POINTER:
+		/* Pointer syntax is not based on keyword, so we
+		 * should never get this type.  */
+		assert(type != ARGTYPE_POINTER);
+		abort();
+	}
+
+	struct arg_type_info *info = malloc(sizeof(*info));
+	if (info == NULL) {
+		report_error(filename, line_no,
+			     "malloc: %s", strerror(errno));
+		return NULL;
+	}
+	*ownp = 1;
+
+	if (type == ARGTYPE_ARRAY) {
+		if (parse_array(str, info) < 0) {
+		fail:
+			free(info);
+			return NULL;
+		}
+	} else {
+		assert(type == ARGTYPE_STRUCT);
+		if (parse_struct(str, info, in_typedef) < 0)
+			goto fail;
+	}
+
+	return info;
+}
+
+static struct named_lens {
+	const char *name;
+	struct lens *lens;
+} lenses[] = {
+	{ "hide", &blind_lens },
+	{ "octal", &octal_lens },
+	{ "oct", &octal_lens },
+	{ "bitvec", &bitvect_lens },
+	{ "hex", &hex_lens },
+	{ "bool", &bool_lens },
+	{ "guess", &guess_lens },
+};
+
+static struct lens *
+name2lens(char **str, int *own_lensp)
+{
+	size_t i;
+	for (i = 0; i < sizeof(lenses)/sizeof(*lenses); ++i)
+		if (try_parse_kwd(str, lenses[i].name) == 0) {
+			*own_lensp = 0;
+			return lenses[i].lens;
+		}
 
 	return NULL;
 }
 
-static void
-parse_typedef(char **str) {
-	char *name;
-	arg_type_info *info;
-	struct typedef_node_t *binding;
+static struct arg_type_info *
+parse_type(char **str, struct param **extra_param, size_t param_num, int *ownp,
+	   struct typedef_node_t *in_typedef)
+{
+	struct arg_type_info *info
+		= parse_nonpointer_type(str, extra_param,
+					param_num, ownp, in_typedef);
+	if (info == NULL)
+		return NULL;
 
-	(*str) += strlen("typedef");
-	eat_spaces(str);
-
-	// Grab out the name of the type
-	name = parse_ident(str);
-
-	// Skip = sign
-	eat_spaces(str);
-	if (**str != '=') {
-		output_line(0,
-				"Syntax error in `%s', line %d: expected '=', got '%c'",
-				filename, line_no, **str);
-		error_count++;
-		return;
-	}
-	(*str)++;
-	eat_spaces(str);
-
-	// Parse the type
-	info = parse_type(str);
-
-	// Insert onto beginning of linked list
-	binding = malloc(sizeof(*binding));
-	binding->name = name;
-	binding->info = info;
-	binding->next = typedefs;
-	typedefs = binding;
-}
-
-static size_t
-arg_sizeof(arg_type_info * arg) {
-	if (arg->type == ARGTYPE_CHAR) {
-		return sizeof(char);
-	} else if (arg->type == ARGTYPE_SHORT || arg->type == ARGTYPE_USHORT) {
-		return sizeof(short);
-	} else if (arg->type == ARGTYPE_FLOAT) {
-		return sizeof(float);
-	} else if (arg->type == ARGTYPE_DOUBLE) {
-		return sizeof(double);
-	} else if (arg->type == ARGTYPE_ENUM) {
-		return sizeof(int);
-	} else if (arg->type == ARGTYPE_STRUCT) {
-		return arg->u.struct_info.size;
-	} else if (arg->type == ARGTYPE_POINTER) {
-		return sizeof(void*);
-	} else if (arg->type == ARGTYPE_ARRAY) {
-		if (arg->u.array_info.len_spec > 0)
-			return arg->u.array_info.len_spec * arg->u.array_info.elt_size;
-		else
-			return sizeof(void *);
-	} else {
-		return sizeof(int);
-	}
-}
-
-#undef alignof
-#define alignof(field,st) ((size_t) ((char*) &st.field - (char*) &st))
-static size_t
-arg_align(arg_type_info * arg) {
-	struct { char c; char C; } cC;
-	struct { char c; short s; } cs;
-	struct { char c; int i; } ci;
-	struct { char c; long l; } cl;
-	struct { char c; void* p; } cp;
-	struct { char c; float f; } cf;
-	struct { char c; double d; } cd;
-
-	static size_t char_alignment = alignof(C, cC);
-	static size_t short_alignment = alignof(s, cs);
-	static size_t int_alignment = alignof(i, ci);
-	static size_t long_alignment = alignof(l, cl);
-	static size_t ptr_alignment = alignof(p, cp);
-	static size_t float_alignment = alignof(f, cf);
-	static size_t double_alignment = alignof(d, cd);
-
-	switch (arg->type) {
-		case ARGTYPE_LONG:
-		case ARGTYPE_ULONG:
-			return long_alignment;
-		case ARGTYPE_CHAR:
-			return char_alignment;
-		case ARGTYPE_SHORT:
-		case ARGTYPE_USHORT:
-			return short_alignment;
-		case ARGTYPE_FLOAT:
-			return float_alignment;
-		case ARGTYPE_DOUBLE:
-			return double_alignment;
-		case ARGTYPE_ADDR:
-		case ARGTYPE_FILE:
-		case ARGTYPE_FORMAT:
-		case ARGTYPE_STRING:
-		case ARGTYPE_STRING_N:
-		case ARGTYPE_POINTER:
-			return ptr_alignment;
-
-		case ARGTYPE_ARRAY:
-			return arg_align(&arg->u.array_info.elt_type[0]);
-
-		case ARGTYPE_STRUCT:
-			return arg_align(arg->u.struct_info.fields[0]);
-
-		default:
-			return int_alignment;
-	}
-}
-
-static size_t
-align_skip(size_t alignment, size_t offset) {
-	if (offset % alignment)
-		return alignment - (offset % alignment);
-	else
-		return 0;
-}
-
-/* I'm sure this isn't completely correct, but just try to get most of
- * them right for now. */
-static void
-align_struct(arg_type_info* info) {
-	size_t offset;
-	int i;
-
-	if (info->u.struct_info.size != 0)
-		return;			// Already done
-
-	// Compute internal padding due to alignment constraints for
-	// various types.
-	offset = 0;
-	for (i = 0; info->u.struct_info.fields[i] != NULL; i++) {
-		arg_type_info *field = info->u.struct_info.fields[i];
-		offset += align_skip(arg_align(field), offset);
-		info->u.struct_info.offset[i] = offset;
-		offset += arg_sizeof(field);
-	}
-
-	info->u.struct_info.size = offset;
-}
-
-static arg_type_info *
-parse_nonpointer_type(char **str) {
-	arg_type_info *simple;
-	arg_type_info *info;
-
-	if (strncmp(*str, "typedef", 7) == 0) {
-		parse_typedef(str);
-		return lookup_prototype(ARGTYPE_UNKNOWN);
-	}
-
-	simple = str2type(str);
-	if (simple->type == ARGTYPE_UNKNOWN) {
-		info = lookup_typedef(str);
-		if (info)
-			return info;
-		else
-			return simple;		// UNKNOWN
-	}
-
-	info = malloc(sizeof(*info));
-	info->type = simple->type;
-
-	/* Code to parse parameterized types will go into the following
-	   switch statement. */
-
-	switch (info->type) {
-
-	/* Syntax: array ( type, N|argN ) */
-	case ARGTYPE_ARRAY:
-		(*str)++;		// Get past open paren
+	while (1) {
 		eat_spaces(str);
-		if ((info->u.array_info.elt_type = parse_type(str)) == NULL)
+		if (**str == '*') {
+			struct arg_type_info *outer = malloc(sizeof(*outer));
+			if (outer == NULL) {
+				if (*ownp) {
+					type_destroy(info);
+					free(info);
+				}
+				report_error(filename, line_no,
+					     "malloc: %s", strerror(errno));
+				return NULL;
+			}
+			type_init_pointer(outer, info, *ownp);
+			*ownp = 1;
+			(*str)++;
+			info = outer;
+		} else
+			break;
+	}
+	return info;
+}
+
+static struct arg_type_info *
+parse_lens(char **str, struct param **extra_param, size_t param_num, int *ownp,
+	   struct typedef_node_t *in_typedef)
+{
+	int own_lens;
+	struct lens *lens = name2lens(str, &own_lens);
+	int has_args = 1;
+	struct arg_type_info *info;
+	if (lens != NULL) {
+		eat_spaces(str);
+
+		/* Octal lens gets special treatment, because of
+		 * backward compatibility.  */
+		if (lens == &octal_lens && **str != '(') {
+			has_args = 0;
+			info = type_get_simple(ARGTYPE_INT);
+			*ownp = 0;
+		} else if (parse_char(str, '(') < 0) {
+			report_error(filename, line_no,
+				     "expected type argument after the lens");
 			return NULL;
-		info->u.array_info.elt_size =
-			arg_sizeof(info->u.array_info.elt_type);
-		(*str)++;		// Get past comma
-		eat_spaces(str);
-		info->u.array_info.len_spec = parse_argnum(str);
-		(*str)++;		// Get past close paren
-		return info;
-
-	/* Syntax: enum ( keyname=value,keyname=value,... ) */
-	case ARGTYPE_ENUM:{
-		struct enum_opt {
-			char *key;
-			int value;
-			struct enum_opt *next;
-		};
-		struct enum_opt *list = NULL;
-		struct enum_opt *p;
-		int entries = 0;
-		int ii;
-
-		eat_spaces(str);
-		(*str)++;		// Get past open paren
-		eat_spaces(str);
-
-		while (**str && **str != ')') {
-			p = (struct enum_opt *) malloc(sizeof(*p));
-			eat_spaces(str);
-			p->key = parse_ident(str);
-			if (error_count) {
-				free(p);
-				return NULL;
-			}
-			eat_spaces(str);
-			if (**str != '=') {
-				free(p->key);
-				free(p);
-				output_line(0,
-						"Syntax error in `%s', line %d: expected '=', got '%c'",
-						filename, line_no, **str);
-				error_count++;
-				return NULL;
-			}
-			++(*str);
-			eat_spaces(str);
-			p->value = parse_int(str);
-			p->next = list;
-			list = p;
-			++entries;
-
-			// Skip comma
-			eat_spaces(str);
-			if (**str == ',') {
-				(*str)++;
-				eat_spaces(str);
-			}
 		}
-
-		info->u.enum_info.entries = entries;
-		info->u.enum_info.keys =
-			(char **) malloc(entries * sizeof(char *));
-		info->u.enum_info.values =
-			(int *) malloc(entries * sizeof(int));
-		for (ii = 0, p = NULL; list; ++ii, list = list->next) {
-			if (p)
-				free(p);
-			info->u.enum_info.keys[ii] = list->key;
-			info->u.enum_info.values[ii] = list->value;
-			p = list;
-		}
-		if (p)
-			free(p);
-
-		return info;
 	}
 
-	case ARGTYPE_STRING:
-		if (!isdigit(**str) && **str != '[') {
-			/* Oops, was just a simple string after all */
-			free(info);
-			return simple;
-		}
-
-		info->type = ARGTYPE_STRING_N;
-
-		/* Backwards compatibility for string0, string1, ... */
-		if (isdigit(**str)) {
-			info->u.string_n_info.size_spec = -parse_int(str);
-			return info;
-		}
-
-		(*str)++;		// Skip past opening [
+	if (has_args) {
 		eat_spaces(str);
-		info->u.string_n_info.size_spec = parse_argnum(str);
-		eat_spaces(str);
-		(*str)++;		// Skip past closing ]
-		return info;
-
-	// Syntax: struct ( type,type,type,... )
-	case ARGTYPE_STRUCT:{
-		int field_num = 0;
-		(*str)++;		// Get past open paren
-		info->u.struct_info.fields =
-			malloc((MAX_ARGS + 1) * sizeof(void *));
-		info->u.struct_info.offset =
-			malloc((MAX_ARGS + 1) * sizeof(size_t));
-		info->u.struct_info.size = 0;
-		eat_spaces(str); // Empty arg list with whitespace inside
-		while (**str && **str != ')') {
-			if (field_num == MAX_ARGS) {
-				output_line(0,
-						"Error in `%s', line %d: Too many structure elements",
-						filename, line_no);
-				error_count++;
-				return NULL;
-			}
-			eat_spaces(str);
-			if (field_num != 0) {
-				(*str)++;	// Get past comma
-				eat_spaces(str);
-			}
-			if ((info->u.struct_info.fields[field_num++] =
-						parse_type(str)) == NULL)
-				return NULL;
-
-			// Must trim trailing spaces so the check for
-			// the closing paren is simple
-			eat_spaces(str);
-		}
-		(*str)++;		// Get past closing paren
-		info->u.struct_info.fields[field_num] = NULL;
-		align_struct(info);
-		return info;
-	}
-
-	default:
-		if (info->type == ARGTYPE_UNKNOWN) {
-			output_line(0, "Syntax error in `%s', line %d: "
-					"Unknown type encountered",
-					filename, line_no);
-			free(info);
-			error_count++;
+		info = parse_type(str, extra_param, param_num, ownp,
+				  in_typedef);
+		if (info == NULL) {
+		fail:
+			if (own_lens && lens != NULL)
+				lens_destroy(lens);
 			return NULL;
-		} else {
-			return info;
 		}
 	}
+
+	if (lens != NULL && has_args) {
+		eat_spaces(str);
+		parse_char(str, ')');
+	}
+
+	/* We can't modify shared types.  Make a copy if we have a
+	 * lens.  */
+	if (lens != NULL && unshare_type_info(&info, ownp) < 0)
+		goto fail;
+
+	if (lens != NULL) {
+		info->lens = lens;
+		info->own_lens = own_lens;
+	}
+
+	return info;
 }
 
-static arg_type_info *
-parse_type(char **str) {
-	arg_type_info *info = parse_nonpointer_type(str);
-	while (**str == '*') {
-		arg_type_info *outer = malloc(sizeof(*info));
-		outer->type = ARGTYPE_POINTER;
-		outer->u.ptr_info.info = info;
-		(*str)++;
-		info = outer;
+static int
+add_param(Function *fun, size_t *allocdp)
+{
+	size_t allocd = *allocdp;
+	/* XXX +1 is for the extra_param handling hack.  */
+	if ((fun->num_params + 1) >= allocd) {
+		allocd = allocd > 0 ? 2 * allocd : 8;
+		void *na = realloc(fun->params, sizeof(*fun->params) * allocd);
+		if (na == NULL)
+			return -1;
+
+		fun->params = na;
+		*allocdp = allocd;
 	}
+	return 0;
+}
+
+static int
+param_is_void(struct param *param)
+{
+	return param->flavor == PARAM_FLAVOR_TYPE
+		&& param->u.type.type->type == ARGTYPE_VOID;
+}
+
+static struct arg_type_info *
+get_hidden_int(void)
+{
+	char *str = strdup("hide(int)");
+	char *ptr = str;
+	assert(str != NULL);
+	int own;
+	struct arg_type_info *info = parse_lens(&ptr, NULL, 0, &own, NULL);
+	assert(info != NULL);
+	free(str);
 	return info;
 }
 
 static Function *
 process_line(char *buf) {
-	Function fun;
-	Function *fun_p;
 	char *str = buf;
 	char *tmp;
-	int i;
-	int float_num = 0;
 
 	line_no++;
 	debug(3, "Reading line %d of `%s'", line_no, filename);
 	eat_spaces(&str);
-	fun.return_info = parse_type(&str);
-	if (fun.return_info == NULL)
+
+	/* A comment or empty line.  */
+	if (*str == ';' || *str == 0 || *str == '\n')
 		return NULL;
-	if (fun.return_info->type == ARGTYPE_UNKNOWN) {
-		debug(3, " Skipping line %d", line_no);
+
+	if (strncmp(str, "typedef", 7) == 0) {
+		parse_typedef(&str);
 		return NULL;
 	}
-	debug(4, " return_type = %d", fun.return_info->type);
+
+	Function *fun = calloc(1, sizeof(*fun));
+	if (fun == NULL) {
+		report_error(filename, line_no,
+			     "alloc function: %s", strerror(errno));
+		return NULL;
+	}
+
+	fun->return_info = parse_lens(&str, NULL, 0,
+				      &fun->own_return_info, NULL);
+	if (fun->return_info == NULL) {
+	err:
+		debug(3, " Skipping line %d", line_no);
+		destroy_fun(fun);
+		return NULL;
+	}
+	debug(4, " return_type = %d", fun->return_info->type);
+
 	eat_spaces(&str);
 	tmp = start_of_arg_sig(str);
-	if (!tmp) {
-		output_line(0, "Syntax error in `%s', line %d", filename,
-				line_no);
-		error_count++;
-		return NULL;
+	if (tmp == NULL) {
+		report_error(filename, line_no, "syntax error");
+		goto err;
 	}
 	*tmp = '\0';
-	fun.name = strdup(str);
+	fun->name = strdup(str);
 	str = tmp + 1;
-	debug(3, " name = %s", fun.name);
-	fun.params_right = 0;
-	for (i = 0; i < MAX_ARGS; i++) {
+	debug(3, " name = %s", fun->name);
+
+	size_t allocd = 0;
+	struct param *extra_param = NULL;
+
+	int have_stop = 0;
+
+	while (1) {
 		eat_spaces(&str);
-		if (*str == ')') {
+		if (*str == ')')
 			break;
-		}
+
 		if (str[0] == '+') {
-			fun.params_right++;
+			if (have_stop == 0) {
+				if (add_param(fun, &allocd) < 0)
+					goto add_err;
+				param_init_stop
+					(&fun->params[fun->num_params++]);
+				have_stop = 1;
+			}
 			str++;
-		} else if (fun.params_right) {
-			fun.params_right++;
 		}
-		fun.arg_info[i] = parse_type(&str);
-		if (fun.arg_info[i] == NULL) {
-			output_line(0, "Syntax error in `%s', line %d"
-					": unknown argument type",
-					filename, line_no);
-			error_count++;
-			return NULL;
+
+		if (add_param(fun, &allocd) < 0) {
+		add_err:
+			report_error(filename, line_no, "(re)alloc params: %s",
+				     strerror(errno));
+			goto err;
 		}
-		if (fun.arg_info[i]->type == ARGTYPE_FLOAT)
-			fun.arg_info[i]->u.float_info.float_index = float_num++;
-		else if (fun.arg_info[i]->type == ARGTYPE_DOUBLE)
-			fun.arg_info[i]->u.double_info.float_index = float_num++;
+
+		int own;
+		struct arg_type_info *type
+			= parse_lens(&str, &extra_param,
+				     fun->num_params - have_stop, &own, NULL);
+		if (type == NULL) {
+			report_error(filename, line_no,
+				     "unknown argument type");
+			goto err;
+		}
+
+		param_init_type(&fun->params[fun->num_params++], type, own);
+
 		eat_spaces(&str);
 		if (*str == ',') {
 			str++;
@@ -634,20 +1199,75 @@ process_line(char *buf) {
 		} else {
 			if (str[strlen(str) - 1] == '\n')
 				str[strlen(str) - 1] = '\0';
-			output_line(0, "Syntax error in `%s', line %d at ...\"%s\"",
-					filename, line_no, str);
-			error_count++;
-			return NULL;
+			report_error(filename, line_no,
+				     "syntax error around \"%s\"", str);
+			goto err;
 		}
 	}
-	fun.num_params = i;
-	fun_p = malloc(sizeof(Function));
-	if (!fun_p) {
-		perror("ltrace: malloc");
-		exit(1);
+
+	/* We used to allow void parameter as a synonym to an argument
+	 * that shouldn't be displayed.  But backends really need to
+	 * know the exact type that they are dealing with.  The proper
+	 * way to do this these days is to use the hide lens.
+	 *
+	 * So if there are any voids in the parameter list, show a
+	 * warning and assume that they are ints.  If there's a sole
+	 * void, assume the function doesn't take any arguments.  The
+	 * latter is conservative, we can drop the argument
+	 * altogether, instead of fetching and then not showing it,
+	 * without breaking any observable behavior.  */
+	if (fun->num_params == 1 && param_is_void(&fun->params[0])) {
+		if (0)
+			/* Don't show this warning.  Pre-0.7.0
+			 * ltrace.conf often used this idiom.  This
+			 * should be postponed until much later, when
+			 * extant uses are likely gone.  */
+			report_warning(filename, line_no,
+				       "sole void parameter ignored");
+		param_destroy(&fun->params[0]);
+		fun->num_params = 0;
+	} else {
+		size_t i;
+		for (i = 0; i < fun->num_params; ++i) {
+			if (param_is_void(&fun->params[i])) {
+				report_warning
+					(filename, line_no,
+					 "void parameter assumed to be "
+					 "'hide(int)'");
+
+				static struct arg_type_info *type = NULL;
+				if (type == NULL)
+					type = get_hidden_int();
+				param_destroy(&fun->params[i]);
+				param_init_type(&fun->params[i], type, 0);
+			}
+		}
 	}
-	memcpy(fun_p, &fun, sizeof(Function));
-	return fun_p;
+
+	if (extra_param != NULL) {
+		assert(fun->num_params < allocd);
+		memcpy(&fun->params[fun->num_params++], extra_param,
+		       sizeof(*extra_param));
+		free(extra_param);
+	}
+
+	return fun;
+}
+
+void
+init_global_config(void)
+{
+	struct arg_type_info *info = malloc(2 * sizeof(*info));
+	if (info == NULL)
+		error(1, errno, "malloc in init_global_config");
+
+	memset(info, 0, 2 * sizeof(*info));
+	info[0].type = ARGTYPE_POINTER;
+	info[0].u.ptr_info.info = &info[1];
+	info[1].type = ARGTYPE_VOID;
+
+	insert_typedef(new_typedef(strdup("addr"), info, 0));
+	insert_typedef(new_typedef(strdup("file"), info, 1));
 }
 
 void
@@ -667,7 +1287,6 @@ read_config_file(char *file) {
 	while (fgets(buf, 1024, stream)) {
 		Function *tmp;
 
-		error_count = 0;
 		tmp = process_line(buf);
 
 		if (tmp) {

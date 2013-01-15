@@ -1,3 +1,24 @@
+/*
+ * This file is part of ltrace.
+ * Copyright (C) 2004,2008,2009 Juan Cespedes
+ * Copyright (C) 2006 Ian Wienand
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
+ * 02110-1301 USA
+ */
+
 #include "config.h"
 
 #include <stdlib.h>
@@ -6,6 +27,7 @@
 #include <signal.h>
 #include <string.h>
 #include "ptrace.h"
+#include "proc.h"
 #include "common.h"
 
 void
@@ -44,7 +66,8 @@ syscall_p(Process *proc, int status, int *sysnum) {
 }
 
 long
-gimme_arg(enum tof type, Process *proc, int arg_num, arg_type_info *info) {
+gimme_arg(enum tof type, Process *proc, int arg_num, struct arg_type_info *info)
+{
 	proc_archdep *a = (proc_archdep *) proc->arch_ptr;
 	if (!a->valid) {
 		fprintf(stderr, "Could not get child registers\n");
@@ -67,15 +90,4 @@ gimme_arg(enum tof type, Process *proc, int arg_num, arg_type_info *info) {
 		exit(1);
 	}
 	return 0;
-}
-
-void
-save_register_args(enum tof type, Process *proc) {
-	proc_archdep *a = (proc_archdep *) proc->arch_ptr;
-	if (a->valid) {
-		if (type == LT_TOF_FUNCTION)
-			memcpy(a->func_arg, &a->regs.u_regs[UREG_G7], sizeof(a->func_arg));
-		else
-			memcpy(a->sysc_arg, &a->regs.u_regs[UREG_G7], sizeof(a->sysc_arg));
-	}
 }

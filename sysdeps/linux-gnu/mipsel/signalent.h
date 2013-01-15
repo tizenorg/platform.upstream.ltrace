@@ -1,32 +1,52 @@
-"SIG_0",			/* 0 */
-    "SIGHUP",	//	    1	/* Hangup (POSIX).  */
-    "SIGINT", //		 2	/* Interrupt (ANSI).  */
-    "SIGQUIT", //		 3	/* Quit (POSIX).  */
-    "SIGILL", //		 4	/* Illegal instruction (ANSI).  */
-    "SIGTRAP", //		 5	/* Trace trap (POSIX).  */
-    "SIGIOT", //		 6	/* IOT trap (4.2 BSD).  */
-    "SIGEMT", //		 7
-    "SIGFPE", //		 8	/* Floating-point exception (ANSI).  */
-    "SIGKILL", //		 9	/* Kill, unblockable (POSIX).  */
-    "SIGBUS", //		10	/* BUS error (4.2 BSD).  */
-    "SIGSEGV", //		11	/* Segmentation violation (ANSI).  */
-    "SIGSYS", //		12
-    "SIGPIPE", //		13	/* Broken pipe (POSIX).  */
-    "SIGALRM", //		14	/* Alarm clock (POSIX).  */
-    "SIGTERM", //		15	/* Termination (ANSI).  */
-    "SIGUSR1", //		16	/* User-defined signal 1 (POSIX).  */
-    "SIGUSR2", //		17	/* User-defined signal 2 (POSIX).  */
-    "SIGCHLD", //		18	/* Child status has changed (POSIX).  */
-    "SIGPWR", //		19	/* Power failure restart (System V).  */
-    "SIGWINCH", //	20	/* Window size change (4.3 BSD, Sun).  */
-    "SIGURG", //		21	/* Urgent condition on socket (4.2 BSD).  */
-    "SIGIO", //		22	/* I/O now possible (4.2 BSD).  */
-    "SIGSTOP", //		23	/* Stop, unblockable (POSIX).  */
-    "SIGTSTP", //		24	/* Keyboard stop (POSIX).  */
-    "SIGCONT", //		25	/* Continue (POSIX).  */
-    "SIGTTIN", //		26	/* Background read from tty (POSIX).  */
-    "SIGTTOU", //		27	/* Background write to tty (POSIX).  */
-    "SIGVTALRM", //	28	/* Virtual alarm clock (4.2 BSD).  */
-    "SIGPROF", //		29	/* Profiling alarm clock (4.2 BSD).  */
-    "SIGXCPU", //		30	/* CPU limit exceeded (4.2 BSD).  */
-    "SIGXFSZ", //		31	/* File size limit exceeded (4.2 BSD).  */
+/*
+ * This file is part of ltrace.
+ * Copyright (C) 2010 Arnaud Patard, Mandriva SA
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
+ * 02110-1301 USA
+ */
+
+	"SIG_0",           /* 0 */
+	"SIGHUP",          /* 1 */
+	"SIGINT",          /* 2 */
+	"SIGQUIT",         /* 3 */
+	"SIGILL",          /* 4 */
+	"SIGTRAP",         /* 5 */
+	"SIGIOT",          /* 6 */
+	"SIGEMT",          /* 7 */
+	"SIGFPE",          /* 8 */
+	"SIGKILL",         /* 9 */
+	"SIGBUS",          /* 10 */
+	"SIGSEGV",         /* 11 */
+	"SIGSYS",          /* 12 */
+	"SIGPIPE",         /* 13 */
+	"SIGALRM",         /* 14 */
+	"SIGTERM",         /* 15 */
+	"SIGUSR1",         /* 16 */
+	"SIGUSR2",         /* 17 */
+	"SIGCHLD",         /* 18 */
+	"SIGPWR",          /* 19 */
+	"SIGWINCH",        /* 20 */
+	"SIGURG",          /* 21 */
+	"SIGIO",           /* 22 */
+	"SIGSTOP",         /* 23 */
+	"SIGTSTP",         /* 24 */
+	"SIGCONT",         /* 25 */
+	"SIGTTIN",         /* 26 */
+	"SIGTTOU",         /* 27 */
+	"SIGVTALRM",       /* 28 */
+	"SIGPROF",         /* 29 */
+	"SIGXCPU",         /* 30 */
+	"SIGXFSZ",         /* 31 */

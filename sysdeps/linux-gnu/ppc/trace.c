@@ -1,14 +1,44 @@
+/*
+ * This file is part of ltrace.
+ * Copyright (C) 2010,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011 Andreas Schwab
+ * Copyright (C) 2002,2004,2008,2009 Juan Cespedes
+ * Copyright (C) 2008 Luis Machado, IBM Corporation
+ * Copyright (C) 2006 Ian Wienand
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
+ * 02110-1301 USA
+ */
+
 #include "config.h"
 
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <signal.h>
-#include <sys/ptrace.h>
-#include <asm/ptrace.h>
+#include <assert.h>
 #include <elf.h>
 #include <errno.h>
+#include <signal.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
+#include "backend.h"
+#include "breakpoint.h"
 #include "common.h"
+#include "insn.h"
+#include "proc.h"
+#include "ptrace.h"
+#include "type.h"
 
 #if (!defined(PTRACE_PEEKUSER) && defined(PTRACE_PEEKUSR))
 # define PTRACE_PEEKUSER PTRACE_PEEKUSR
@@ -21,20 +51,13 @@
 void
 get_arch_dep(Process *proc) {
 #ifdef __powerpc64__
-	if (proc->arch_ptr)
-		return;
 	proc->mask_32bit = (proc->e_machine == EM_PPC);
-	proc->arch_ptr = (void *)1;
 #endif
 }
 
-/* Returns 1 if syscall, 2 if sysret, 0 otherwise. */
 #define SYSCALL_INSN   0x44000002
 
-unsigned int greg = 3;
-unsigned int freg = 1;
-unsigned int vreg = 2;
-
+/* Returns 1 if syscall, 2 if sysret, 0 otherwise. */
 int
 syscall_p(Process *proc, int status, int *sysnum) {
 	if (WIFSTOPPED(status)
@@ -59,97 +82,167 @@ syscall_p(Process *proc, int status, int *sysnum) {
 	return 0;
 }
 
-/* Grab functions arguments based on the PPC64 ABI.  */
-long
-gimme_arg(enum tof type, Process *proc, int arg_num, arg_type_info *info) {
-	long data;
+/* The atomic skip code is mostly taken from GDB.  */
 
-	if (type == LT_TOF_FUNCTIONR) {
-		if (info->type == ARGTYPE_FLOAT || info->type == ARGTYPE_DOUBLE)
-			return ptrace (PTRACE_PEEKUSER, proc->pid,
-					sizeof (long) * (PT_FPR0 + 1), 0);
-		else
-			return ptrace (PTRACE_PEEKUSER, proc->pid,
-					sizeof (long) * PT_R3, 0);
-	}
+/* In plt.h.  XXX make this official interface.  */
+int read_target_4(struct Process *proc, arch_addr_t addr, uint32_t *lp);
 
-	/* Check if we're entering a new function call to list parameters.  If
-	   so, initialize the register control variables to keep track of where
-	   the parameters were stored.  */
-	if (type == LT_TOF_FUNCTION && arg_num == 0) {
-	  /* Initialize the set of registrers for parameter passing.  */
-		greg = 3;
-		freg = 1;
-		vreg = 2;
-	}
-
-	if (info->type == ARGTYPE_FLOAT || info->type == ARGTYPE_DOUBLE) {
-		if (freg <= 13 || (proc->mask_32bit && freg <= 8)) {
-			data = ptrace (PTRACE_PEEKUSER, proc->pid,
-					sizeof (long) * (PT_FPR0 + freg), 0);
-
-			if (info->type == ARGTYPE_FLOAT) {
-			/* float values passed in FP registers are automatically
-			promoted to double. We need to convert it back to float
-			before printing.  */
-				union { long val; float fval; double dval; } cvt;
-				cvt.val = data;
-				cvt.fval = (float) cvt.dval;
-				data = cvt.val;
-			}
-
-			freg++;
-			greg++;
-
-			return data;
-		}
-	}
-	else if (greg <= 10) {
-		data = ptrace (PTRACE_PEEKUSER, proc->pid,
-				sizeof (long) * greg, 0);
-		greg++;
-
-		return data;
-	}
-	else
-		return ptrace (PTRACE_PEEKDATA, proc->pid,
-				proc->stack_pointer + sizeof (long) *
-				(arg_num - 8), 0);
-
-	return 0;
-}
-
-void
-save_register_args(enum tof type, Process *proc) {
-}
-
-/* Read a single long from the process's memory address 'addr'.  */
 int
-arch_umovelong (Process *proc, void *addr, long *result, arg_type_info *info) {
-	long pointed_to;
+arch_atomic_singlestep(struct Process *proc, struct breakpoint *sbp,
+		       int (*add_cb)(void *addr, void *data),
+		       void *add_cb_data)
+{
+	arch_addr_t ip = get_instruction_pointer(proc);
+	struct breakpoint *other = address2bpstruct(proc->leader, ip);
 
-	errno = 0;
+	debug(1, "arch_atomic_singlestep pid=%d addr=%p %s(%p)",
+	      proc->pid, ip, breakpoint_name(sbp), sbp->addr);
 
-	pointed_to = ptrace (PTRACE_PEEKTEXT, proc->pid, addr, 0);
+	/* If the original instruction was lwarx/ldarx, we can't
+	 * single-step over it, instead we have to execute the whole
+	 * atomic block at once.  */
+	union {
+		uint32_t insn;
+		char buf[BREAKPOINT_LENGTH];
+	} u;
+	if (other != NULL) {
+		memcpy(u.buf, sbp->orig_value, BREAKPOINT_LENGTH);
+	} else if (read_target_4(proc, ip, &u.insn) < 0) {
+		fprintf(stderr, "couldn't read instruction at IP %p\n", ip);
+		/* Do the normal singlestep.  */
+		return 1;
+	}
 
-	if (pointed_to == -1 && errno)
-		return -errno;
+	if ((u.insn & LWARX_MASK) != LWARX_INSTRUCTION
+	    && (u.insn & LWARX_MASK) != LDARX_INSTRUCTION)
+		return 1;
 
-	/* Since int's are 4-bytes (long is 8-bytes) in length for ppc64, we
-	   need to shift the long values returned by ptrace to end up with
-	   the correct value.  */
+	debug(1, "singlestep over atomic block at %p", ip);
 
-	if (info) {
-		if (info->type == ARGTYPE_INT || (proc->mask_32bit && (info->type == ARGTYPE_POINTER
-		    || info->type == ARGTYPE_STRING))) {
-			pointed_to = pointed_to >> 32;
+	int insn_count;
+	arch_addr_t addr = ip;
+	for (insn_count = 0; ; ++insn_count) {
+		addr += 4;
+		unsigned long l = ptrace(PTRACE_PEEKTEXT, proc->pid, addr, 0);
+		if (l == (unsigned long)-1 && errno)
+			return -1;
+		uint32_t insn;
+#ifdef __powerpc64__
+		insn = l >> 32;
+#else
+		insn = l;
+#endif
 
-			/* Make sure we have nothing in the upper word so we can
-			   do a explicit cast from long to int later in the code.  */
-			pointed_to &= 0x00000000ffffffff;
+		/* If a conditional branch is found, put a breakpoint
+		 * in its destination address.  */
+		if ((insn & BRANCH_MASK) == BC_INSN) {
+			arch_addr_t branch_addr = ppc_branch_dest(addr, insn);
+			debug(1, "pid=%d, branch in atomic block from %p to %p",
+			      proc->pid, addr, branch_addr);
+			if (add_cb(branch_addr, add_cb_data) < 0)
+				return -1;
+		}
+
+		/* Assume that the atomic sequence ends with a
+		 * stwcx/stdcx instruction.  */
+		if ((insn & STWCX_MASK) == STWCX_INSTRUCTION
+		    || (insn & STWCX_MASK) == STDCX_INSTRUCTION) {
+			debug(1, "pid=%d, found end of atomic block %p at %p",
+			      proc->pid, ip, addr);
+			break;
+		}
+
+		/* Arbitrary cut-off.  If we didn't find the
+		 * terminating instruction by now, just give up.  */
+		if (insn_count > 16) {
+			fprintf(stderr, "[%d] couldn't find end of atomic block"
+				" at %p\n", proc->pid, ip);
+			return -1;
 		}
 	}
 
-	*result = pointed_to;
+	/* Put the breakpoint to the next instruction.  */
+	addr += 4;
+	if (add_cb(addr, add_cb_data) < 0)
+		return -1;
+
+	debug(1, "PTRACE_CONT");
+	ptrace(PTRACE_CONT, proc->pid, 0, 0);
 	return 0;
+}
+
+size_t
+arch_type_sizeof(struct Process *proc, struct arg_type_info *info)
+{
+	if (proc == NULL)
+		return (size_t)-2;
+
+	switch (info->type) {
+	case ARGTYPE_VOID:
+		return 0;
+
+	case ARGTYPE_CHAR:
+		return 1;
+
+	case ARGTYPE_SHORT:
+	case ARGTYPE_USHORT:
+		return 2;
+
+	case ARGTYPE_INT:
+	case ARGTYPE_UINT:
+		return 4;
+
+	case ARGTYPE_LONG:
+	case ARGTYPE_ULONG:
+	case ARGTYPE_POINTER:
+		return proc->e_machine == EM_PPC64 ? 8 : 4;
+
+	case ARGTYPE_FLOAT:
+		return 4;
+	case ARGTYPE_DOUBLE:
+		return 8;
+
+	case ARGTYPE_ARRAY:
+	case ARGTYPE_STRUCT:
+		/* Use default value.  */
+		return (size_t)-2;
+
+	default:
+		assert(info->type != info->type);
+		abort();
+		break;
+	}
+}
+
+size_t
+arch_type_alignof(struct Process *proc, struct arg_type_info *info)
+{
+	if (proc == NULL)
+		return (size_t)-2;
+
+	switch (info->type) {
+	default:
+		assert(info->type != info->type);
+		abort();
+		break;
+
+	case ARGTYPE_CHAR:
+	case ARGTYPE_SHORT:
+	case ARGTYPE_USHORT:
+	case ARGTYPE_INT:
+	case ARGTYPE_UINT:
+	case ARGTYPE_LONG:
+	case ARGTYPE_ULONG:
+	case ARGTYPE_POINTER:
+	case ARGTYPE_FLOAT:
+	case ARGTYPE_DOUBLE:
+		/* On both PPC and PPC64, fundamental types have the
+		 * same alignment as size.  */
+		return arch_type_sizeof(proc, info);
+
+	case ARGTYPE_ARRAY:
+	case ARGTYPE_STRUCT:
+		/* Use default value.  */
+		return (size_t)-2;
+	}
 }

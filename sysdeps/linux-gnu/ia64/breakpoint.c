@@ -1,14 +1,33 @@
+/*
+ * This file is part of ltrace.
+ * Copyright (C) 2008,2009 Juan Cespedes
+ * Copyright (C) 2005,2006 Ian Wienand
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
+ * 02110-1301 USA
+ */
+
 /* IA64 breakpoint support.  Much of this clagged from gdb
  *  -Ian Wienand <ianw@gelato.unsw.edu.au> 10/3/2005
  */
 
-#include "config.h"
-
 #include <sys/ptrace.h>
 #include <string.h>
-#include "arch.h"
-#include "options.h"
-#include "output.h"
+#include <assert.h>
+
+#include "breakpoint.h"
 #include "debug.h"
 
 static long long
@@ -153,7 +172,8 @@ union bundle_t {
 };
 
 void
-arch_enable_breakpoint(pid_t pid, Breakpoint *sbp) {
+arch_enable_breakpoint(pid_t pid, struct breakpoint *sbp)
+{
 
 	unsigned long addr = (unsigned long)sbp->addr;
 	union bundle_t bundle;
@@ -163,9 +183,7 @@ arch_enable_breakpoint(pid_t pid, Breakpoint *sbp) {
 
 	debug(1, "Enable Breakpoint at %p)", sbp->addr);
 
-	if (slotnum > 2)
-		printf
-		    ("Can't insert breakpoint for slot numbers greater than 2.");
+	assert(slotnum <= 2);
 
 	addr &= ~0x0f;
 	bundle.ubundle[0] = ptrace(PTRACE_PEEKTEXT, pid, addr, 0);
@@ -190,7 +208,8 @@ arch_enable_breakpoint(pid_t pid, Breakpoint *sbp) {
 }
 
 void
-arch_disable_breakpoint(pid_t pid, const Breakpoint *sbp) {
+arch_disable_breakpoint(pid_t pid, const struct breakpoint *sbp)
+{
 
 	unsigned long addr = (unsigned long)sbp->addr;
 	int slotnum = (int)(addr & 0x0f) & 0x3;

@@ -1,3 +1,26 @@
+/*
+ * This file is part of ltrace.
+ * Copyright (C) 2009 Juan Cespedes
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
+ * 02110-1301 USA
+ */
+
+#ifndef _LTRACE_H_
+#define _LTRACE_H_
+
 typedef enum Event_type Event_type;
 enum Event_type {
 	EVENT_NONE=0,
@@ -9,6 +32,7 @@ enum Event_type {
 	EVENT_ARCH_SYSCALL,
 	EVENT_ARCH_SYSRET,
 	EVENT_CLONE,
+	EVENT_VFORK,
 	EVENT_EXEC,
 	EVENT_BREAKPOINT,
 	EVENT_LIBCALL,
@@ -17,10 +41,10 @@ enum Event_type {
 	EVENT_MAX
 };
 
-typedef struct Process Process;
 typedef struct Event Event;
 struct Event {
-	Process * proc;
+	struct Event * next;
+	struct Process * proc;
 	Event_type type;
 	union {
 		int ret_val;     /* EVENT_EXIT */
@@ -36,3 +60,5 @@ typedef void (*callback_func) (Event *);
 extern void ltrace_init(int argc, char **argv);
 extern void ltrace_add_callback(callback_func f, Event_type type);
 extern void ltrace_main(void);
+
+#endif /* _LTRACE_H_ */

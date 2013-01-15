@@ -1,3 +1,24 @@
+/*
+ * This file is part of ltrace.
+ * Copyright (C) 2003,2008,2009 Juan Cespedes
+ * Copyright (C) 2006 Ian Wienand
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
+ * 02110-1301 USA
+ */
+
 #include <stdio.h>
 #include <stdarg.h>
 
@@ -16,6 +37,7 @@ debug_(int level, const char *file, int line, const char *fmt, ...) {
 	va_end(args);
 
 	output_line(NULL, "DEBUG: %s:%d: %s", file, line, buf);
+	fflush(options.output);
 }
 
 /*
@@ -101,7 +123,7 @@ xinfdump(long pid, void *ptr, int len) {
 	addr = ((addr + sizeof(long) - 1) / sizeof(long)) * sizeof(long);
 
 	for (i = 0; i < wrdcnt; ++i) {
-		infwords[i] = ptrace(PTRACE_PEEKTEXT, pid, addr);
+		infwords[i] = ptrace(PTRACE_PEEKTEXT, pid, (void *)addr, NULL);
 		addr += sizeof(long);
 	}
 

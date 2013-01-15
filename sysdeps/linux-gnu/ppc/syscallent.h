@@ -1,4 +1,25 @@
-"0",				/* 0 */
+/*
+ * This file is part of ltrace.
+ * Copyright (C) 2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2006 Ian Wienand
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
+ * 02110-1301 USA
+ */
+
+    "restart_syscall",	        /* 0 */
     "exit",			/* 1 */
     "fork",			/* 2 */
     "read",			/* 3 */
@@ -177,8 +198,8 @@
     "rt_sigtimedwait",		/* 176 */
     "rt_sigqueueinfo",		/* 177 */
     "rt_sigsuspend",		/* 178 */
-    "pread",			/* 179 */
-    "pwrite",			/* 180 */
+    "pread64",			/* 179 */
+    "pwrite64",			/* 180 */
     "chown",			/* 181 */
     "getcwd",			/* 182 */
     "capget",			/* 183 */
@@ -254,6 +275,12 @@
     "fstatfs64",		/* 253 */
     "fadvise64_64",		/* 254 */
     "rtas",			/* 255 */
+    "sys_debug_setcontext",	/* 256 */
+    "server",			/* 257 */
+    "migrate_pages",		/* 258 */
+    "mbind",			/* 259 */
+    "get_mempolicy",		/* 260 */
+    "set_mempolicy",		/* 261 */
     "mq_open",			/* 262 */
     "mq_unlink",		/* 263 */
     "mq_timedsend",		/* 264 */
@@ -270,3 +297,78 @@
     "inotify_init",		/* 275 */
     "inotify_add_watch",	/* 276 */
     "inotify_rm_watch",		/* 277 */
+    "spu_run",			/* 278 */
+    "spu_create",		/* 279 */
+    "pselect6",			/* 280 */
+    "ppoll",			/* 281 */
+    "unshare",			/* 282 */
+    "splice",			/* 283 */
+    "tee",			/* 284 */
+    "vmsplice",			/* 285 */
+    "openat",			/* 286 */
+    "mkdirat",			/* 287 */
+    "mknodat",			/* 288 */
+    "fchownat",			/* 289 */
+    "futimesat",		/* 290 */
+    "fstatat64",		/* 291 */
+    "unlinkat",			/* 292 */
+    "renameat",			/* 293 */
+    "linkat",			/* 294 */
+    "symlinkat",		/* 295 */
+    "readlinkat",		/* 296 */
+    "fchmodat",			/* 297 */
+    "faccessat",		/* 298 */
+    "get_robust_list",		/* 299 */
+    "set_robust_list",		/* 300 */
+    "move_pages",		/* 301 */
+    "getcpu",			/* 302 */
+    "epoll_pwait",		/* 303 */
+    "utimensat",		/* 304 */
+    "signalfd",			/* 305 */
+    "timerfd_create",		/* 306 */
+    "eventfd",			/* 307 */
+    "sync_file_range2",		/* 308 */
+    "fallocate",		/* 309 */
+    "subpage_prot",		/* 310 */
+    "timerfd_settime",		/* 311 */
+    "timerfd_gettime",		/* 312 */
+    "signalfd4",		/* 313 */
+    "eventfd2",			/* 314 */
+    "epoll_create1",		/* 315 */
+    "dup3",			/* 316 */
+    "pipe2",			/* 317 */
+    "inotify_init1",		/* 318 */
+    "perf_event_open",		/* 319 */
+    "preadv",			/* 320 */
+    "pwritev",			/* 321 */
+    "rt_tgsigqueueinfo",	/* 322 */
+    "fanotify_init",		/* 323 */
+    "fanotify_mark",		/* 324 */
+    "prlimit64",		/* 325 */
+    "socket",			/* 326 */
+    "bind",			/* 327 */
+    "connect",			/* 328 */
+    "listen",			/* 329 */
+    "accept",			/* 330 */
+    "getsockname",		/* 331 */
+    "getpeername",		/* 332 */
+    "socketpair",		/* 333 */
+    "send",			/* 334 */
+    "sendto",			/* 335 */
+    "recv",			/* 336 */
+    "recvfrom",			/* 337 */
+    "shutdown",			/* 338 */
+    "setsockopt",		/* 339 */
+    "getsockopt",		/* 340 */
+    "sendmsg",			/* 341 */
+    "recvmsg",			/* 342 */
+    "recvmmsg",			/* 343 */
+    "accept4",			/* 344 */
+    "name_to_handle_at",	/* 345 */
+    "open_by_handle_at",	/* 346 */
+    "clock_adjtime",		/* 347 */
+    "syncfs",			/* 348 */
+    "sendmmsg",			/* 349 */
+    "setns",			/* 350 */
+    "process_vm_readv",		/* 351 */
+    "process_writev",		/* 352 */

@@ -1,3 +1,25 @@
+/*
+ * This file is part of ltrace.
+ * Copyright (C) 2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 1998,2004,2008,2009 Juan Cespedes
+ * Copyright (C) 2006 Ian Wienand
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
+ * 02110-1301 USA
+ */
+
 #include "config.h"
 
 #include <string.h>
@@ -7,6 +29,7 @@
 #include <sys/ptrace.h>
 #include <asm/ptrace.h>
 
+#include "proc.h"
 #include "common.h"
 #include "output.h"
 #include "ptrace.h"
@@ -19,10 +42,10 @@
 # define PTRACE_POKEUSER PTRACE_POKEUSR
 #endif
 
-#define off_r0 0
-#define off_r7 28
-#define off_ip 48
-#define off_pc 60
+#define off_r0 ((void *)0)
+#define off_r7 ((void *)28)
+#define off_ip ((void *)48)
+#define off_pc ((void *)60)
 
 void
 get_arch_dep(Process *proc) {
@@ -44,12 +67,15 @@ syscall_p(Process *proc, int status, int *sysnum) {
 	if (WIFSTOPPED(status)
 	    && WSTOPSIG(status) == (SIGTRAP | proc->tracesysgood)) {
 		/* get the user's pc (plus 8) */
-		int pc = ptrace(PTRACE_PEEKUSER, proc->pid, off_pc, 0);
+		unsigned pc = ptrace(PTRACE_PEEKUSER, proc->pid, off_pc, 0);
+		pc = pc - 4;
 		/* fetch the SWI instruction */
-		int insn = ptrace(PTRACE_PEEKTEXT, proc->pid, pc - 4, 0);
+		unsigned insn = ptrace(PTRACE_PEEKTEXT, proc->pid,
+				       (void *)pc, 0);
 		int ip = ptrace(PTRACE_PEEKUSER, proc->pid, off_ip, 0);
 
-		if (insn == 0xef000000 || insn == 0x0f000000) {
+		if (insn == 0xef000000 || insn == 0x0f000000
+		    || (insn & 0xffff0000) == 0xdf000000) {
 			/* EABI syscall */
 			*sysnum = ptrace(PTRACE_PEEKUSER, proc->pid, off_r7, 0);
 		} else if ((insn & 0xfff00000) == 0xef900000) {
@@ -61,8 +87,9 @@ syscall_p(Process *proc, int status, int *sysnum) {
 			 * are coming from a signal handler, so the current
 			 * PC does not point to the instruction just after the
 			 * "swi" one. */
-			output_line(proc, "unexpected instruction 0x%x at %p", insn, pc - 4);
-			return -1;
+			output_line(proc, "unexpected instruction 0x%x at %p",
+				    insn, pc);
+			return 0;
 		}
 		if ((*sysnum & 0xf0000) == 0xf0000) {
 			/* arch-specific syscall */
@@ -77,7 +104,8 @@ syscall_p(Process *proc, int status, int *sysnum) {
 }
 
 long
-gimme_arg(enum tof type, Process *proc, int arg_num, arg_type_info *info) {
+gimme_arg(enum tof type, Process *proc, int arg_num, struct arg_type_info *info)
+{
 	proc_archdep *a = (proc_archdep *) proc->arch_ptr;
 
 	if (arg_num == -1) {	/* return value */
@@ -91,8 +119,8 @@ gimme_arg(enum tof type, Process *proc, int arg_num, arg_type_info *info) {
 				return a->regs.uregs[arg_num];
 			if (a->valid && type == LT_TOF_FUNCTIONR)
 				return a->func_arg[arg_num];
-			return ptrace(PTRACE_PEEKUSER, proc->pid, 4 * arg_num,
-				      0);
+			return ptrace(PTRACE_PEEKUSER, proc->pid,
+				      (void *)(4 * arg_num), 0);
 		} else {
 			return ptrace(PTRACE_PEEKDATA, proc->pid,
 				      proc->stack_pointer + 4 * (arg_num - 4),
@@ -104,8 +132,8 @@ gimme_arg(enum tof type, Process *proc, int arg_num, arg_type_info *info) {
 				return a->regs.uregs[arg_num];
 			if (a->valid && type == LT_TOF_SYSCALLR)
 				return a->sysc_arg[arg_num];
-			return ptrace(PTRACE_PEEKUSER, proc->pid, 4 * arg_num,
-				      0);
+			return ptrace(PTRACE_PEEKUSER, proc->pid,
+				      (void *)(4 * arg_num), 0);
 		} else {
 			return ptrace(PTRACE_PEEKDATA, proc->pid,
 				      proc->stack_pointer + 4 * (arg_num - 5),
@@ -117,15 +145,4 @@ gimme_arg(enum tof type, Process *proc, int arg_num, arg_type_info *info) {
 	}
 
 	return 0;
-}
-
-void
-save_register_args(enum tof type, Process *proc) {
-	proc_archdep *a = (proc_archdep *) proc->arch_ptr;
-	if (a->valid) {
-		if (type == LT_TOF_FUNCTION)
-			memcpy(a->func_arg, a->regs.uregs, sizeof(a->func_arg));
-		else
-			memcpy(a->sysc_arg, a->regs.uregs, sizeof(a->sysc_arg));
-	}
 }

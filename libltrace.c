@@ -1,66 +1,93 @@
+/*
+ * This file is part of ltrace.
+ * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2009 Juan Cespedes
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 of the
+ * License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
+ * 02110-1301 USA
+ */
+
 #include "config.h"
 
+#include <sys/param.h>
+#include <sys/wait.h>
+#include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <string.h>
-#include <errno.h>
-#include <sys/param.h>
-#include <signal.h>
-#include <sys/wait.h>
+#include <unistd.h>
 
 #include "common.h"
+#include "proc.h"
+#include "read_config_file.h"
+#include "backend.h"
 
 char *command = NULL;
-Process *list_of_processes = NULL;
 
 int exiting = 0;		/* =1 if a SIGINT or SIGTERM has been received */
 
-static void
-signal_alarm(int sig) {
-	Process *tmp = list_of_processes;
+static enum callback_status
+stop_non_p_processes(Process *proc, void *data)
+{
+	int stop = 1;
 
-	signal(SIGALRM, SIG_DFL);
-	while (tmp) {
-		struct opt_p_t *tmp2 = opt_p;
-		while (tmp2) {
-			if (tmp->pid == tmp2->pid) {
-				tmp = tmp->next;
-				if (!tmp) {
-					return;
-				}
-				tmp2 = opt_p;
-				continue;
-			}
-			tmp2 = tmp2->next;
+	struct opt_p_t *it;
+	for (it = opt_p; it != NULL; it = it->next) {
+		Process * p_proc = pid2proc(it->pid);
+		if (p_proc == NULL) {
+			printf("stop_non_p_processes: %d terminated?\n", it->pid);
+			continue;
 		}
-		debug(2, "Sending SIGSTOP to process %u\n", tmp->pid);
-		kill(tmp->pid, SIGSTOP);
-		tmp = tmp->next;
+		if (p_proc == proc || p_proc->leader == proc->leader) {
+			stop = 0;
+			break;
+		}
 	}
+
+	if (stop) {
+		debug(2, "Sending SIGSTOP to process %u", proc->pid);
+		kill(proc->pid, SIGSTOP);
+	}
+
+	return CBS_CONT;
 }
 
 static void
-signal_exit(int sig) {
-	exiting = 1;
-	debug(1, "Received interrupt signal; exiting...");
+signal_alarm(int sig) {
+	signal(SIGALRM, SIG_DFL);
+	each_process(NULL, &stop_non_p_processes, NULL);
+}
+
+static void
+signal_exit(int sig)
+{
+	if (exiting != 0)
+		return;
+
+	exiting = 1 + !!os_ltrace_exiting_sighandler();
+
 	signal(SIGINT, SIG_IGN);
 	signal(SIGTERM, SIG_IGN);
 	signal(SIGALRM, signal_alarm);
-	if (opt_p) {
-		struct opt_p_t *tmp = opt_p;
-		while (tmp) {
-			debug(2, "Sending SIGSTOP to process %u\n", tmp->pid);
-			kill(tmp->pid, SIGSTOP);
-			tmp = tmp->next;
-		}
-	}
-	alarm(1);
+	//alarm(1);
 }
 
 static void
-normal_exit(void) {
-	output_line(0, 0);
+normal_exit(void)
+{
 	if (options.summary) {
 		show_summary();
 	}
@@ -79,6 +106,7 @@ ltrace_init(int argc, char **argv) {
 	signal(SIGTERM, signal_exit);	/*  ... or killed */
 
 	argv = process_options(argc, argv);
+	init_global_config();
 	while (opt_F) {
 		/* If filename begins with ~, expand it to the user's home */
 		/* directory. This does not correctly handle ~yoda, but that */
@@ -98,17 +126,30 @@ ltrace_init(int argc, char **argv) {
 		} else {
 			read_config_file(opt_F->filename);
 		}
-		opt_F = opt_F->next;
-	}
-	if (opt_e) {
-		struct opt_e_t *tmp = opt_e;
-		while (tmp) {
-			debug(1, "Option -e: %s\n", tmp->name);
-			tmp = tmp->next;
-		}
+
+		struct opt_F_t *next = opt_F->next;
+		if (opt_F->own_filename)
+			free(opt_F->filename);
+		free(opt_F);
+		opt_F = next;
 	}
 	if (command) {
-		execute_program(open_program(command, 0), argv);
+		/* Check that the binary ABI is supported before
+		 * calling execute_program.  */
+		struct ltelf lte = {};
+		open_elf(&lte, command);
+		do_close_elf(&lte);
+
+		pid_t pid = execute_program(command, argv);
+		struct Process *proc = open_program(command, pid);
+		if (proc == NULL) {
+			fprintf(stderr, "couldn't open program '%s': %s\n",
+				command, strerror(errno));
+			exit(EXIT_FAILURE);
+		}
+
+		trace_set_options(proc);
+		continue_process(pid);
 	}
 	opt_p_tmp = opt_p;
 	while (opt_p_tmp) {
