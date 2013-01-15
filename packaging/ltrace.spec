@@ -1,4 +1,6 @@
 Name:           ltrace
+Version:        0.7.2
+Release:        0
 BuildRequires:  binutils-devel
 BuildRequires:  dejagnu
 BuildRequires:  gcc-c++
@@ -7,9 +9,6 @@ Url:            http://ltrace.org/
 Summary:        Trace the Library and System Calls a Program Makes
 License:        GPL-2.0+
 Group:          Development/Tools/Debuggers
-Version:        0.5.3
-Release:        0
-BuildRoot:      %{_tmppath}/%{name}-%{version}-build
 Source:         ltrace-%{version}.tar.bz2
 Source2:        baselibs.conf
 
@@ -30,26 +29,20 @@ child processes may fail or some things may not work as expected.
 %setup -q
 
 %build
-export CFLAGS="%{optflags} -W -Wall"
-./configure --prefix=/usr \
-	    --sysconfdir=/etc \
-	    --mandir=%{_mandir} \
-%ifarch armv4l
-	    --build=arm-tizen-linux
-%else
-	    --build=%{_target_cpu}-tizen-linux
-%endif
+export CFLAGS="%{optflags}"
+%configure --build=%{_target_cpu}-tizen-linux
 make
 
 %install
-make install DESTDIR=%{buildroot}
+%make_install
 rm -rf %{buildroot}/usr/share/doc/ltrace
 
 %files
 %defattr(-,root,root)
-%doc COPYING README 
+%license COPYING
 %{_bindir}/ltrace
-%{_mandir}/man1/ltrace.1.gz
+%{_mandir}/man?/ltrace.?.gz
+%{_mandir}/man?/ltrace.conf.?.gz
 %config /etc/ltrace.conf
 
 %changelog
