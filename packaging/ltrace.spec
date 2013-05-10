@@ -2,13 +2,12 @@ Name:           ltrace
 Version:        0.7.2
 Release:        0
 BuildRequires:  binutils-devel
-BuildRequires:  dejagnu
 BuildRequires:  gcc-c++
 BuildRequires:  libelf-devel
 Url:            http://ltrace.org/
 Summary:        Trace the Library and System Calls a Program Makes
 License:        GPL-2.0+
-Group:          Development/Tools/Debuggers
+Group:          Development/Tools
 Source:         ltrace-%{version}.tar.bz2
 Source2:        baselibs.conf
 
