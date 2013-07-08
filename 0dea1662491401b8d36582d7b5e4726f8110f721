@@ -1,0 +1,10 @@
+Change-Id: I0dea1662491401b8d36582d7b5e4726f8110f721
+Code-Review+2: Ryan Ware <ware@linux.intel.com>
+Verified+1: Ryan Ware <ware@linux.intel.com>
+Code-Review+1: Patrick McCarty <patrick.mccarty@linux.intel.com>
+Code-Review+1: Michael Demeter <michael.demeter@intel.com>
+Submitted-by: Ryan Ware <ware@linux.intel.com>
+Submitted-at: Mon, 08 Jul 2013 09:36:34 -0700
+Reviewed-on: https://review.tizen.org/gerrit/5199
+Project: platform/upstream/ltrace
+Branch: refs/heads/tizen
