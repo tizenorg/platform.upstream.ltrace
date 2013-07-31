@@ -28,7 +28,7 @@ child processes may fail or some things may not work as expected.
 %setup -q
 
 %build
-export CFLAGS="%{optflags}"
+export CFLAGS="%{optflags} -Wall -Wno-unused-local-typedefs"
 %configure --build=%{_target_cpu}-tizen-linux
 make
 
