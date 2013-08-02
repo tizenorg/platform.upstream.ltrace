@@ -10,6 +10,7 @@ License:        GPL-2.0+
 Group:          Development/Tools
 Source:         ltrace-%{version}.tar.bz2
 Source2:        baselibs.conf
+Source1001: 	ltrace.manifest
 
 %description
 Ltrace is a program that runs the specified command until it exits. It
@@ -26,6 +27,7 @@ child processes may fail or some things may not work as expected.
 
 %prep
 %setup -q
+cp %{SOURCE1001} .
 
 %build
 export CFLAGS="%{optflags} -Wall -Wno-unused-local-typedefs"
@@ -37,6 +39,7 @@ make
 rm -rf %{buildroot}/usr/share/doc/ltrace
 
 %files
+%manifest %{name}.manifest
 %defattr(-,root,root)
 %license COPYING
 %{_bindir}/ltrace
