@@ -1,3 +1,6 @@
+* Sun Aug 25 2013 Chengwei Yang <chengwei.yang@intel.com>
+- Remove debian packaging stuff
+
 * Wed Jul 31 2013 Anas Nashif <anas.nashif@intel.com> submit/tizen/20130510.050414@58edbba
 - do not error on warnings
 - do not depend on dejagnu
