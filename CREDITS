@@ -31,6 +31,10 @@ W: http://cespedes.org/
 E: cespedes@debian.org
 D: All development up to 0.5.3
 
+N: Luca Clementi
+E: luca.clementi@gmail.com
+D: stack trace improvement
+
 N: Joe Damato
 E: ice799@gmail.com
 D: libdl support
@@ -48,6 +52,10 @@ D: Fixes
 N: Morten Eriksen
 E: mortene@sim.no
 D: Fixes
+
+N: Thierry Fauck
+E: thierry@linux.vnet.ibm.com
+D: ppc64el port
 
 N: Timothy Fesig
 E: slate@us.ibm.com
@@ -72,6 +80,10 @@ D: SPARC port
 D: x86-64 fixes
 D: libelf support
 D: Fixes
+
+N: Dima Kogan
+E: dima@secretsauce.net
+D: Reading prototypes from DWARF information
 
 N: Michal Ludvig
 E: mludvig@suse.cz
@@ -105,6 +117,11 @@ D: MIPSel port
 N: Ian Wienand
 E: ianw@gelato.unsw.edu.au
 D: ia64 port
+
+N: Peter Wu
+E: lekensteyn@gmail.com
+W: https://lekensteyn.nl/
+D: Fixes
 
 N: Andrey Zonov
 E: zont@FreeBSD.org

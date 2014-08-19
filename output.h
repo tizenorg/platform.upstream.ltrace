@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011, 2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011, 2012, 2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 2009 Juan Cespedes
  *
  * This program is free software; you can redistribute it and/or
@@ -18,17 +18,19 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
  * 02110-1301 USA
  */
-#ifndef _OUTPUT_H_
-#define _OUTPUT_H_
+
+#ifndef OUTPUT_H
+#define OUTPUT_H
 
 #include "fetch.h"
 #include "forward.h"
 
-void output_line(struct Process *proc, const char *fmt, ...);
-void output_left(enum tof type, struct Process *proc,
+void output_line(struct process *proc, const char *fmt, ...);
+void output_left(enum tof type, struct process *proc,
 		 struct library_symbol *libsym);
-void output_right(enum tof type, struct Process *proc,
-		  struct library_symbol *libsym);
+void output_right(enum tof type, struct process *proc,
+		  struct library_symbol *libsym,
+		  struct timedelta *spent);
 
 /* This function is for emitting lists of comma-separated strings.
  *
@@ -55,4 +57,4 @@ void report_error(char const *file, unsigned line_no, const char *fmt, ...);
 void report_warning(char const *file, unsigned line_no, const char *fmt, ...);
 void report_global_error(const char *fmt, ...);
 
-#endif /* _OUTPUT_H_ */
+#endif /* OUTPUT_H */

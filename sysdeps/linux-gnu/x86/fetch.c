@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata
+ * Copyright (C) 2011,2012,2013 Petr Machata
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -58,9 +58,10 @@ struct fetch_context
 	struct user_regs_struct iregs;
 	struct user_fpregs_struct fpregs;
 
-	void *stack_pointer;
+	arch_addr_t stack_pointer;
 	size_t ireg;	/* Used-up integer registers.  */
 	size_t freg;	/* Used-up floating registers.  */
+	int machine;
 
 	union {
 		struct {
@@ -137,14 +138,14 @@ allocate_stack_slot(struct fetch_context *context,
 		    struct value *valuep, size_t sz, size_t offset,
 		    size_t archw)
 {
+	assert(valuep != NULL);
 	size_t a = type_alignof(valuep->inferior, valuep->type);
 	if (a < archw)
 		a = archw;
 	context->stack_pointer
 		= (void *)align((unsigned long)context->stack_pointer, a);
 
-	if (valuep != NULL)
-		value_in_inferior(valuep, context->stack_pointer);
+	value_in_inferior(valuep, context->stack_pointer);
 	context->stack_pointer += sz;
 }
 
@@ -238,20 +239,41 @@ allocate_integer(struct fetch_context *context, struct value *valuep,
 
 	case POOL_SYSCALL:
 #ifdef __x86_64__
-		switch (context->ireg) {
-			HANDLE(0, rdi);
-			HANDLE(1, rsi);
-			HANDLE(2, rdx);
-			HANDLE(3, r10);
-			HANDLE(4, r8);
-			HANDLE(5, r9);
-		default:
-			assert(!"More than six syscall arguments???");
-			abort();
+		if (context->machine == EM_X86_64) {
+			switch (context->ireg) {
+				HANDLE(0, rdi);
+				HANDLE(1, rsi);
+				HANDLE(2, rdx);
+				HANDLE(3, r10);
+				HANDLE(4, r8);
+				HANDLE(5, r9);
+			default:
+				assert(!"More than six syscall arguments???");
+				abort();
+			}
 		}
-#else
-		i386_unreachable();
 #endif
+		if (context->machine == EM_386) {
+
+#ifdef __x86_64__
+# define HANDLE32(NUM, WHICH) HANDLE(NUM, r##WHICH)
+#else
+# define HANDLE32(NUM, WHICH) HANDLE(NUM, e##WHICH)
+#endif
+
+			switch (context->ireg) {
+				HANDLE32(0, bx);
+				HANDLE32(1, cx);
+				HANDLE32(2, dx);
+				HANDLE32(3, si);
+				HANDLE32(4, di);
+				HANDLE32(5, bp);
+			default:
+				assert(!"More than six syscall arguments???");
+				abort();
+			}
+#undef HANDLE32
+		}
 
 	case POOL_RETVAL:
 		switch (context->ireg) {
@@ -323,14 +345,14 @@ allocate_class(enum arg_class cls, struct fetch_context *context,
 }
 
 static ssize_t
-classify(struct Process *proc, struct fetch_context *context,
-	 struct arg_type_info *info, struct value *valuep, enum arg_class classes[],
+classify(struct process *proc, struct fetch_context *context,
+	 struct arg_type_info *info, enum arg_class classes[],
 	 size_t sz, size_t eightbytes);
 
 /* This classifies one eightbyte part of an array or struct.  */
 static ssize_t
-classify_eightbyte(struct Process *proc, struct fetch_context *context,
-		   struct arg_type_info *info, struct value *valuep,
+classify_eightbyte(struct process *proc, struct fetch_context *context,
+		   struct arg_type_info *info,
 		   enum arg_class *classp, size_t start, size_t end,
 		   struct arg_type_info *(*getter)(struct arg_type_info *,
 						   size_t))
@@ -343,7 +365,7 @@ classify_eightbyte(struct Process *proc, struct fetch_context *context,
 		size_t sz = type_sizeof(proc, info2);
 		if (sz == (size_t)-1)
 			return -1;
-		if (classify(proc, context, info2, valuep, &cls2, sz, 1) < 0)
+		if (classify(proc, context, info2, &cls2, sz, 1) < 0)
 			return -1;
 
 		if (cls == CLASS_NO)
@@ -364,8 +386,8 @@ classify_eightbyte(struct Process *proc, struct fetch_context *context,
 
 /* This classifies small arrays and structs.  */
 static ssize_t
-classify_eightbytes(struct Process *proc, struct fetch_context *context,
-		    struct arg_type_info *info, struct value *valuep,
+classify_eightbytes(struct process *proc, struct fetch_context *context,
+		    struct arg_type_info *info,
 		    enum arg_class classes[], size_t elements,
 		    size_t eightbytes,
 		    struct arg_type_info *(*getter)(struct arg_type_info *,
@@ -384,9 +406,9 @@ classify_eightbytes(struct Process *proc, struct fetch_context *context,
 			}
 
 		enum arg_class cls1, cls2;
-		if (classify_eightbyte(proc, context, info, valuep, &cls1,
+		if (classify_eightbyte(proc, context, info, &cls1,
 				       0, start_2nd, getter) < 0
-		    || classify_eightbyte(proc, context, info, valuep, &cls2,
+		    || classify_eightbyte(proc, context, info, &cls2,
 					  start_2nd, elements, getter) < 0)
 			return -1;
 
@@ -400,7 +422,7 @@ classify_eightbytes(struct Process *proc, struct fetch_context *context,
 		return 2;
 	}
 
-	return classify_eightbyte(proc, context, info, valuep, classes,
+	return classify_eightbyte(proc, context, info, classes,
 				  0, elements, getter);
 }
 
@@ -432,8 +454,8 @@ flatten_structure(struct arg_type_info *flattened, struct arg_type_info *info)
 }
 
 static ssize_t
-classify(struct Process *proc, struct fetch_context *context,
-	 struct arg_type_info *info, struct value *valuep, enum arg_class classes[],
+classify(struct process *proc, struct fetch_context *context,
+	 struct arg_type_info *info, enum arg_class classes[],
 	 size_t sz, size_t eightbytes)
 {
 	switch (info->type) {
@@ -474,7 +496,7 @@ classify(struct Process *proc, struct fetch_context *context,
 		if (expr_eval_constant(info->u.array_info.length, &l) < 0)
 			return -1;
 
-		return classify_eightbytes(proc, context, info, valuep, classes,
+		return classify_eightbytes(proc, context, info, classes,
 					   (size_t)l, eightbytes,
 					   get_array_field);
 
@@ -492,7 +514,7 @@ classify(struct Process *proc, struct fetch_context *context,
 			goto done;
 		}
 		ret = classify_eightbytes(proc, context, &flattened,
-					  valuep, classes,
+					  classes,
 					  type_struct_size(&flattened),
 					  eightbytes, type_struct_get);
 	done:
@@ -517,7 +539,7 @@ pass_by_reference(struct value *valuep, enum arg_class classes[])
 }
 
 static ssize_t
-classify_argument(struct Process *proc, struct fetch_context *context,
+classify_argument(struct process *proc, struct fetch_context *context,
 		  struct arg_type_info *info, struct value *valuep,
 		  enum arg_class classes[], size_t *sizep)
 {
@@ -541,11 +563,11 @@ classify_argument(struct Process *proc, struct fetch_context *context,
 			return pass_by_reference(valuep, classes);
 	}
 
-	return classify(proc, context, info, valuep, classes, sz, eightbytes);
+	return classify(proc, context, info, classes, sz, eightbytes);
 }
 
 static int
-fetch_register_banks(struct Process *proc, struct fetch_context *context,
+fetch_register_banks(struct process *proc, struct fetch_context *context,
 		     int floating)
 {
 	if (ptrace(PTRACE_GETREGS, proc->pid, 0, &context->iregs) < 0)
@@ -566,12 +588,21 @@ fetch_register_banks(struct Process *proc, struct fetch_context *context,
 
 static int
 arch_fetch_arg_next_32(struct fetch_context *context, enum tof type,
-		       struct Process *proc, struct arg_type_info *info,
+		       struct process *proc, struct arg_type_info *info,
 		       struct value *valuep)
 {
 	size_t sz = type_sizeof(proc, info);
 	if (sz == (size_t)-1)
 		return -1;
+	if (value_reserve(valuep, sz) == NULL)
+		return -1;
+
+	if (type == LT_TOF_SYSCALL || type == LT_TOF_SYSCALLR) {
+		int cls = allocate_integer(context, valuep,
+					   sz, 0, POOL_SYSCALL);
+		assert(cls == CLASS_INTEGER);
+		return 0;
+	}
 
 	allocate_stack_slot(context, valuep, sz, 0, 4);
 
@@ -580,7 +611,7 @@ arch_fetch_arg_next_32(struct fetch_context *context, enum tof type,
 
 static int
 arch_fetch_retval_32(struct fetch_context *context, enum tof type,
-		     struct Process *proc, struct arg_type_info *info,
+		     struct process *proc, struct arg_type_info *info,
 		     struct value *valuep)
 {
 	if (fetch_register_banks(proc, context, type == LT_TOF_FUNCTIONR) < 0)
@@ -646,7 +677,7 @@ fetch_stack_pointer(struct fetch_context *context)
 
 struct fetch_context *
 arch_fetch_arg_init_32(struct fetch_context *context,
-		       enum tof type, struct Process *proc,
+		       enum tof type, struct process *proc,
 		       struct arg_type_info *ret_info)
 {
 	context->stack_pointer = fetch_stack_pointer(context) + 4;
@@ -673,7 +704,7 @@ arch_fetch_arg_init_32(struct fetch_context *context,
 
 struct fetch_context *
 arch_fetch_arg_init_64(struct fetch_context *ctx, enum tof type,
-		       struct Process *proc, struct arg_type_info *ret_info)
+		       struct process *proc, struct arg_type_info *ret_info)
 {
 	/* The first stack slot holds a return address.  */
 	ctx->stack_pointer = fetch_stack_pointer(ctx) + 8;
@@ -698,12 +729,13 @@ arch_fetch_arg_init_64(struct fetch_context *ctx, enum tof type,
 }
 
 struct fetch_context *
-arch_fetch_arg_init(enum tof type, struct Process *proc,
+arch_fetch_arg_init(enum tof type, struct process *proc,
 		    struct arg_type_info *ret_info)
 {
 	struct fetch_context *ctx = malloc(sizeof(*ctx));
 	if (ctx == NULL)
 		return NULL;
+	ctx->machine = proc->e_machine;
 
 	assert(type != LT_TOF_FUNCTIONR
 	       && type != LT_TOF_SYSCALLR);
@@ -724,7 +756,7 @@ arch_fetch_arg_init(enum tof type, struct Process *proc,
 }
 
 struct fetch_context *
-arch_fetch_arg_clone(struct Process *proc, struct fetch_context *context)
+arch_fetch_arg_clone(struct process *proc, struct fetch_context *context)
 {
 	struct fetch_context *ret = malloc(sizeof(*ret));
 	if (ret == NULL)
@@ -734,7 +766,7 @@ arch_fetch_arg_clone(struct Process *proc, struct fetch_context *context)
 
 static int
 arch_fetch_pool_arg_next(struct fetch_context *context, enum tof type,
-			 struct Process *proc, struct arg_type_info *info,
+			 struct process *proc, struct arg_type_info *info,
 			 struct value *valuep, enum reg_pool pool)
 {
 	enum arg_class classes[2];
@@ -776,7 +808,7 @@ arch_fetch_pool_arg_next(struct fetch_context *context, enum tof type,
 
 int
 arch_fetch_fun_retval(struct fetch_context *context, enum tof type,
-		      struct Process *proc, struct arg_type_info *info,
+		      struct process *proc, struct arg_type_info *info,
 		      struct value *valuep)
 {
 	assert(type != LT_TOF_FUNCTION
@@ -808,7 +840,7 @@ arch_fetch_fun_retval(struct fetch_context *context, enum tof type,
 
 int
 arch_fetch_arg_next(struct fetch_context *context, enum tof type,
-		    struct Process *proc, struct arg_type_info *info,
+		    struct process *proc, struct arg_type_info *info,
 		    struct value *valuep)
 {
 	if (proc->e_machine == EM_386)
@@ -832,7 +864,7 @@ arch_fetch_arg_next(struct fetch_context *context, enum tof type,
 
 int
 arch_fetch_retval(struct fetch_context *context, enum tof type,
-		  struct Process *proc, struct arg_type_info *info,
+		  struct process *proc, struct arg_type_info *info,
 		  struct value *valuep)
 {
 	if (proc->e_machine == EM_386)

@@ -1,4 +1,68 @@
 -*-org-*-
+* Version 0.8.0
+** Prototype libraries
+   - Each DSO can now ship an ltrace config file (called prototype
+     library) that ltrace will open when that DSO is loaded to process
+     image.  See ltrace(1) for details.
+
+   - ltrace.conf is no longer part of installation tarball.  Instead,
+     we now ship libc.so.conf, libm.so.conf, libacl.so.conf, and
+     syscalls.conf.  Those are now istalled to /usr/share/ltrace by
+     default.  /etc/ltrace.conf and $HOME/.ltrace.conf are still
+     loaded if present, and can contain arbitrary user configuration.
+
+   - The option -F was retrofitted to be a colon-separated list of
+     prototype libraries, and directories to look for prototype
+     libraries in.  On Linux, ltrace looks into XDG_CONFIG_HOME,
+     XDG_CONFIG_DIRS, and /usr/share/ltrace as well.
+
+   - Wide character strings are supported in prototypes.  Use "string"
+     lens as usual, but use array of integers as underlying type.
+     libc.so.conf now contains prototypes of wide character functions.
+
+   - Sole void function parameter such as in the following example, is
+     now considered obsolete:
+
+     | int fork(void); |
+
+     This use is still accepted, taken to mean "hide(int)", but
+     produces a warning, and will be removed in future.
+
+   - Prototypes are now read from DWARF debug info, if available. This
+     complements the data available in config files
+
+** Architectural support
+   - MIPS and MIPSel are now handled by the same backend.
+   - ARMv6, ARMv7 and ARMv8 (AArch64) are supported, including full
+     fetch backend.  ARMv8 backend doesn't support tracing of 32-bit
+     binaries, as currently there's no 32-bit userspace available for
+     ARM64 processors.
+   - Imagination Technologies Meta is now supported.
+   - PowerPC64 ELFv2 little-endian ABI is now supported including full
+     fetch backend.
+
+   - On Linux, tracing of IFUNC symbols is supported.  On i386,
+     x86_64, ppc32 with secure PLT and ppc64, IRELATIVE PLT slots are
+     traced as well.
+
+** -w output now shows full library path
+    The output format is similar to glibc's backtrace_symbols, e.g.:
+     > /bin/ls(_init+0x19be) [0x40398e]
+     > /lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0xed) [0x7f50cbc3676d]
+     > /bin/ls(_init+0x25fd) [0x4045cd]
+
+* Version 0.7.3 [2013-09-15 Sun]
+** Bugfixes
+*** [MIPS] Fix build on mips big endian
+    This bug caused messages like:
+    | Making all in mips
+    | /bin/sh: line 17: cd: mips: No such file or directory
+*** [MIPS] Fix SIGSEGV on mips big endian
+    This bug caused runtime messages like:
+    | [0x4000000] --- SIGSEGV (Segmentation fault) ---
+    | [0xffffffff] +++ killed by SIGSEGV +++
+*** Fix build with CLANG on FREEBSD
+
 * Version 0.7.2 [2012-12-07 Fri]
 ** Bugfixes
 *** (Again) detect VDSO entry in r_debug linkmap with non-empty name
@@ -286,7 +350,7 @@
 
 * License
 -------------------------------------------------------------------------------
-Copyright (C) 2012 Petr Machata <pmachata@redhat.com>
+Copyright (C) 2012-2014 Petr Machata <pmachata@redhat.com>
 This file is part of ltrace.
 
 ltrace is free software; you can redistribute it and/or modify it

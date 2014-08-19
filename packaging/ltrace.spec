@@ -31,6 +31,7 @@ cp %{SOURCE1001} .
 
 %build
 export CFLAGS="%{optflags} -Wall -Wno-unused-local-typedefs"
+/bin/sh ./autogen.sh
 %configure --build=%{_target_cpu}-tizen-linux
 make
 
@@ -45,6 +46,9 @@ rm -rf %{buildroot}/usr/share/doc/ltrace
 %{_bindir}/ltrace
 %{_mandir}/man?/ltrace.?.gz
 %{_mandir}/man?/ltrace.conf.?.gz
-%config /etc/ltrace.conf
+%config /usr/share/ltrace/syscalls.conf
+%config /usr/share/ltrace/libc.so.conf
+%config /usr/share/ltrace/libm.so.conf
+%config /usr/share/ltrace/libacl.so.conf
 
 %changelog

@@ -1,6 +1,6 @@
 # -*- Autoconf -*-
 # This file is part of ltrace.
-# Copyright (C) 2010,2012 Petr Machata, Red Hat Inc.
+# Copyright (C) 2010,2012,2013,2014 Petr Machata, Red Hat Inc.
 # Copyright (C) 2010,2011 Joe Damato
 # Copyright (C) 2010 Marc Kleine-Budde
 # Copyright (C) 2010 Zachary T Welch
@@ -21,9 +21,10 @@
 # 02110-1301 USA
 
 # Process this file with autoconf to produce a configure script.
-AC_PREREQ(2.65)
+AC_PREREQ([2.65])
 
-AC_INIT([ltrace],[0.7.2],[ltrace-devel@lists.alioth.debian.org])
+AC_INIT([ltrace],[0.7.91],[ltrace-devel@lists.alioth.debian.org],
+	[ltrace],[http://ltrace.alioth.debian.org/])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_SRCDIR(libltrace.c)
 AC_CONFIG_MACRO_DIR([config/m4])
@@ -32,7 +33,8 @@ AC_CANONICAL_BUILD
 AC_CANONICAL_HOST
 
 case "${host_os}" in
-    linux-gnu*)	HOST_OS="linux-gnu" ;;
+    linux-gnu*) HOST_OS="linux-gnu" ;;
+    linux-uclibc*) HOST_OS="linux-gnu" ;;
     *)		AC_MSG_ERROR([unkown host-os ${host_os}]) ;;
 esac
 AC_SUBST(HOST_OS)
@@ -40,9 +42,8 @@ AC_SUBST(HOST_OS)
 case "${host_cpu}" in
     arm*|sa110)		HOST_CPU="arm" ;;
     cris*)		HOST_CPU="cris" ;;
-    mips*el)		HOST_CPU="mipsel" ;;
     mips*)		HOST_CPU="mips" ;;
-    powerpc|powerpc64)	HOST_CPU="ppc" ;;
+    powerpc|powerpc64|powerpc64le)	HOST_CPU="ppc" ;;
     sun4u|sparc64)	HOST_CPU="sparc" ;;
     s390x)		HOST_CPU="s390" ;;
     i?86|x86_64)	HOST_CPU="x86" ;;
@@ -56,6 +57,15 @@ LT_INIT
 # libtool-2:  LT_INIT()
 AM_INIT_AUTOMAKE([foreign no-exeext dist-bzip2])
 AM_MAINTAINER_MODE
+
+#
+# We use stat(2).  Even though we don't care about the file size or
+# inode number, stat will fail with EOVERFLOW if either of these
+# exceeds 32 bits.  We therefore ask for stat64 if available.  Do this
+# test as soon as possible, as large file support may influence
+# whether other headers are available.
+#
+AC_SYS_LARGEFILE
 
 AC_ARG_WITH([libelf],
   AS_HELP_STRING([--with-libelf], [Prefix of libelf headers/library]),
@@ -118,6 +128,51 @@ dnl Check security_get_boolean_active availability.
 AC_CHECK_HEADERS(selinux/selinux.h)
 AC_CHECK_LIB(selinux, security_get_boolean_active)
 
+dnl Whether (and which) elfutils libdw.so to use for unwinding.
+AC_ARG_WITH(elfutils,
+  AS_HELP_STRING([--with-elfutils], [Use elfutils libdwfl unwinding support]),
+  [case "${withval}" in
+  (yes|no) enable_elfutils=$withval;;
+  (*) enable_elfutils=yes
+    AM_CPPFLAGS="${AM_CPPFLAGS} -I${withval}/include"
+    AM_LDFLAGS="${AM_LDFLAGS} -L${withval}/lib"
+    elfutils_LD_LIBRARY_PATH="${withval}/lib:${withval}/lib/elfutils"
+    ;;
+esac],[enable_elfutils=maybe])
+
+dnl Check whether we have the elfutils libdwfl.h header installed.
+saved_CPPFLAGS="${CPPFLAGS}"
+CPPFLAGS="${CPPFLAGS} ${AM_CPPFLAGS}"
+AC_CHECK_HEADERS([elfutils/libdwfl.h],[have_libdwfl_h=yes])
+CPPFLAGS="${saved_CPPFLAGS}"
+
+dnl And whether libdw.so provides the unwinding functions.
+saved_LDFLAGS="${LDFLAGS}"
+LDFLAGS="${LDFLAGS} ${AM_LDFLAGS}"
+AC_CHECK_LIB([dw], [dwfl_getthread_frames], [have_libdw_dwfl_frames=yes])
+LDFLAGS="${saved_LDFLAGS}"
+
+AC_MSG_CHECKING([whether to use elfutils libdwfl unwinding support])
+case "${enable_elfutils}" in
+(yes|maybe)
+  if test x$have_libdwfl_h = xyes -a x$have_libdw_dwfl_frames = xyes; then
+    enable_elfutils=yes
+  elif test $enable_elfutils = maybe; then
+    enable_elfutils=no
+  else
+    AC_MSG_RESULT([$enable_elfutils])
+    AC_MSG_ERROR([Missing elfutils/libdwfl.h or dwfl_getthread_frames not in libdw.so])
+  fi
+  ;;
+(*) ;;
+esac
+AC_MSG_RESULT([$enable_elfutils])
+
+if test x"$enable_elfutils" = xyes; then
+  libdw_LIBS=-ldw
+  AC_SUBST(libdw_LIBS)
+  AC_DEFINE([HAVE_LIBDW], [1], [we have elfutils libdw])
+fi
 
 # HAVE_LIBUNWIND
 AC_ARG_WITH(libunwind,
@@ -155,12 +210,12 @@ AC_MSG_RESULT([$enable_libunwind])
 
 if test x"$enable_libunwind" = xyes; then
   case "${host_cpu}" in
-      arm*|sa110)         UNWIND_ARCH="arm" ;;
-      i?86)               UNWIND_ARCH="x86" ;;
-      powerpc)            UNWIND_ARCH="ppc32" ;;
-      powerpc64)          UNWIND_ARCH="ppc64" ;;
-      mips*)              UNWIND_ARCH="mips" ;;
-      *)                  UNWIND_ARCH="${host_cpu}" ;;
+      arm*|sa110)	  UNWIND_ARCH="arm" ;;
+      i?86)		  UNWIND_ARCH="x86" ;;
+      powerpc)		  UNWIND_ARCH="ppc32" ;;
+      powerpc64|powerpc64le)	UNWIND_ARCH="ppc64" ;;
+      mips*)		  UNWIND_ARCH="mips" ;;
+      *)		  UNWIND_ARCH="${host_cpu}" ;;
   esac
 
   saved_LDFLAGS="${LDFLAGS}"
@@ -183,6 +238,13 @@ if test x"$enable_libunwind" = xyes; then
   LDFLAGS="${saved_LDFLAGS}"
 fi
 
+if test x"$enable_elfutils" = xyes -a x"$enable_libunwind" = xyes; then
+  AC_MSG_ERROR([Cannot enable both --with-libunwind and --with-elfutils])
+fi
+
+if test x"$enable_elfutils" = xyes -o x"$enable_libunwind" = xyes; then
+  AC_DEFINE([HAVE_UNWINDER], [1], [we have an unwinder available])
+fi
 
 saved_CPPFLAGS="${CPPFLAGS}"
 saved_LDFLAGS="${LDFLAGS}"
@@ -215,6 +277,8 @@ CPPFLAGS="${saved_CPPFLAGS}"
 LDFLAGS="${saved_LDFLAGS}"
 
 AM_CPPFLAGS=" \
+	-DSYSCONFDIR="'\"$(sysconfdir)\"'" \
+	-DPKGDATADIR="'\"$(pkgdatadir)\"'" \
 	${AM_CPPFLAGS} \
 	-I\$(top_srcdir)/sysdeps/${HOST_OS}/${HOST_CPU} \
 	-I\$(top_srcdir)/sysdeps/${HOST_OS} \
@@ -245,23 +309,48 @@ AC_CHECK_SIZEOF([long])
 
 
 # Checks for library functions.
-AC_FUNC_ERROR_AT_LINE
 AC_FUNC_FORK
 AC_CHECK_FUNCS([ \
 	alarm \
 	atexit \
-	getcwd \
 	gettimeofday \
 	memset \
-	mkdir \
-	rmdir \
 	strchr \
 	strdup \
 	strerror \
+	strsignal \
 	strtol \
 	strtoul \
 ])
 
+#
+# Define HAVE_OPEN_MEMSTREAM if open_memstream is available.  glibc
+# before 2.10, eglibc and uClibc all need _GNU_SOURCE defined for
+# open_memstream to become visible, so check for that as well.  If
+# unavailable, require that tmpfile be present.  There's no
+# HAVE_TMPFILE, as we plain require that to be present as a fallback.
+#
+AC_CHECK_FUNCS([open_memstream], [],
+	[AC_MSG_CHECKING([for open_memstream with _GNU_SOURCE])
+	 AC_LINK_IFELSE(
+		[AC_LANG_PROGRAM([[#define _GNU_SOURCE 1
+				   #include <stdio.h>]],
+				 [[char *buf; size_t sz;
+				   return open_memstream(&buf, &sz) != 0;]])],
+
+		 [AC_MSG_RESULT([yes])
+		  AC_DEFINE([HAVE_OPEN_MEMSTREAM], [1],
+			[Define if open_memstream exists.])],
+
+		 [AC_MSG_RESULT([no])
+		  AC_CHECK_FUNC([tmpfile], [],
+			[AC_MSG_ERROR(
+			    [Either open_memstream or tmpfile required.])])])])
+
+#
+# Define HAVE_GETOPT_LONG if that is available.
+#
+AC_CHECK_HEADER([getopt.h], [AC_CHECK_FUNCS([getopt_long])])
 
 #
 # Debugging
@@ -298,23 +387,27 @@ if test x$use_valgrind = xyes; then
     fi
 fi
 AM_CONDITIONAL(USE_VALGRIND, test "$use_valgrind" = yes)
+AM_CONDITIONAL(HAVE_LIBDW, test x"$enable_elfutils" = xyes)
 
 AC_SUBST(AM_CPPFLAGS)
 AC_SUBST(AM_CFLAGS)
 AC_SUBST(AM_LDFLAGS)
 AC_SUBST(libelf_LD_LIBRARY_PATH)
+AC_SUBST(elfutils_LD_LIBRARY_PATH)
 AC_SUBST(libunwind_LD_LIBRARY_PATH)
 
 AC_CONFIG_FILES([
 	Makefile
 	sysdeps/Makefile
 	sysdeps/linux-gnu/Makefile
+	sysdeps/linux-gnu/aarch64/Makefile
 	sysdeps/linux-gnu/alpha/Makefile
 	sysdeps/linux-gnu/arm/Makefile
 	sysdeps/linux-gnu/cris/Makefile
 	sysdeps/linux-gnu/ia64/Makefile
 	sysdeps/linux-gnu/m68k/Makefile
-	sysdeps/linux-gnu/mipsel/Makefile
+	sysdeps/linux-gnu/metag/Makefile
+	sysdeps/linux-gnu/mips/Makefile
 	sysdeps/linux-gnu/ppc/Makefile
 	sysdeps/linux-gnu/s390/Makefile
 	sysdeps/linux-gnu/sparc/Makefile

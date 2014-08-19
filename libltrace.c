@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011,2012,2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 2009 Juan Cespedes
  *
  * This program is free software; you can redistribute it and/or
@@ -24,29 +24,33 @@
 #include <sys/param.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <limits.h>
+#include <locale.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include "backend.h"
 #include "common.h"
 #include "proc.h"
+#include "prototype.h"
 #include "read_config_file.h"
-#include "backend.h"
+#include "summary.h"
 
 char *command = NULL;
 
 int exiting = 0;		/* =1 if a SIGINT or SIGTERM has been received */
 
 static enum callback_status
-stop_non_p_processes(Process *proc, void *data)
+stop_non_p_processes(struct process *proc, void *data)
 {
 	int stop = 1;
 
 	struct opt_p_t *it;
 	for (it = opt_p; it != NULL; it = it->next) {
-		Process * p_proc = pid2proc(it->pid);
+		struct process *p_proc = pid2proc(it->pid);
 		if (p_proc == NULL) {
 			printf("stop_non_p_processes: %d terminated?\n", it->pid);
 			continue;
@@ -88,9 +92,8 @@ signal_exit(int sig)
 static void
 normal_exit(void)
 {
-	if (options.summary) {
+	if (options.summary)
 		show_summary();
-	}
 	if (options.output) {
 		fclose(options.output);
 		options.output = NULL;
@@ -98,7 +101,10 @@ normal_exit(void)
 }
 
 void
-ltrace_init(int argc, char **argv) {
+ltrace_init(int argc, char **argv)
+{
+	setlocale(LC_ALL, "");
+
 	struct opt_p_t *opt_p_tmp;
 
 	atexit(normal_exit);
@@ -107,41 +113,20 @@ ltrace_init(int argc, char **argv) {
 
 	argv = process_options(argc, argv);
 	init_global_config();
-	while (opt_F) {
-		/* If filename begins with ~, expand it to the user's home */
-		/* directory. This does not correctly handle ~yoda, but that */
-		/* isn't as bad as it seems because the shell will normally */
-		/* be doing the expansion for us; only the hardcoded */
-		/* ~/.ltrace.conf should ever use this code. */
-		if (opt_F->filename[0] == '~') {
-			char path[PATH_MAX];
-			char *home_dir = getenv("HOME");
-			if (home_dir) {
-				strncpy(path, home_dir, PATH_MAX - 1);
-				path[PATH_MAX - 1] = '\0';
-				strncat(path, opt_F->filename + 1,
-						PATH_MAX - strlen(path) - 1);
-				read_config_file(path);
-			}
-		} else {
-			read_config_file(opt_F->filename);
-		}
 
-		struct opt_F_t *next = opt_F->next;
-		if (opt_F->own_filename)
-			free(opt_F->filename);
-		free(opt_F);
-		opt_F = next;
-	}
 	if (command) {
 		/* Check that the binary ABI is supported before
 		 * calling execute_program.  */
-		struct ltelf lte = {};
-		open_elf(&lte, command);
-		do_close_elf(&lte);
+		{
+			struct ltelf lte;
+			if (ltelf_init(&lte, command) == 0)
+				ltelf_destroy(&lte);
+			else
+				exit(EXIT_FAILURE);
+		}
 
 		pid_t pid = execute_program(command, argv);
-		struct Process *proc = open_program(command, pid);
+		struct process *proc = open_program(command, pid);
 		if (proc == NULL) {
 			fprintf(stderr, "couldn't open program '%s': %s\n",
 				command, strerror(errno));

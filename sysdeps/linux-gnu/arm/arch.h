@@ -1,5 +1,6 @@
 /*
  * This file is part of ltrace.
+ * Copyright (C) 2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 1998,2004,2008 Juan Cespedes
  *
  * This program is free software; you can redistribute it and/or
@@ -18,6 +19,11 @@
  * 02110-1301 USA
  */
 
+#ifndef LTRACE_ARM_ARCH_H
+#define LTRACE_ARM_ARCH_H
+
+#include <libelf.h>
+
 #define ARCH_HAVE_ENABLE_BREAKPOINT 1
 #define ARCH_HAVE_DISABLE_BREAKPOINT 1
 
@@ -31,7 +37,24 @@
 #define LT_ELFCLASS	ELFCLASS32
 #define LT_ELF_MACHINE	EM_ARM
 
+#define ARCH_HAVE_SW_SINGLESTEP
+#define ARCH_HAVE_FETCH_ARG
+#define ARCH_HAVE_FETCH_PACK
+#define ARCH_HAVE_SIZEOF
+#define ARCH_HAVE_ALIGNOF
 #define ARCH_HAVE_BREAKPOINT_DATA
 struct arch_breakpoint_data {
 	int thumb_mode;
 };
+
+#define ARCH_HAVE_LTELF_DATA
+struct arch_ltelf_data {
+	Elf_Data *jmprel_data;
+};
+
+#define ARCH_HAVE_LIBRARY_DATA
+struct arch_library_data {
+	unsigned int hardfp:1;
+};
+
+#endif /* LTRACE_ARM_ARCH_H */

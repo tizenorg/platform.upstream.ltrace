@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2012, 2013, 2014 Petr Machata, Red Hat Inc.
  * Copyright (C) 2009,2010 Joe Damato
  * Copyright (C) 1998,1999,2002,2003,2004,2007,2008,2009 Juan Cespedes
  * Copyright (C) 2006 Ian Wienand
@@ -26,6 +26,8 @@
 #include "config.h"
 
 #include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -39,13 +41,7 @@
 #include "common.h"
 #include "filter.h"
 #include "glob.h"
-
-#ifndef SYSCONFDIR
-#define SYSCONFDIR "/etc"
-#endif
-
-#define SYSTEM_CONFIG_FILE SYSCONFDIR "/ltrace.conf"
-#define USER_CONFIG_FILE "~/.ltrace.conf"
+#include "demangle.h"
 
 struct options_t options = {
 	.align    = DEFAULT_ALIGN,    /* alignment column for results */
@@ -72,8 +68,8 @@ int opt_T = 0;			/* show the time spent inside each call */
 /* List of pids given to option -p: */
 struct opt_p_t *opt_p = NULL;	/* attach to process with a given pid */
 
-/* List of filenames give to option -F: */
-struct opt_F_t *opt_F = NULL;	/* alternate configuration file(s) */
+/* Vector of struct opt_F_t.  */
+struct vect opt_F;
 
 static void
 err_usage(void) {
@@ -86,35 +82,35 @@ usage(void) {
 	fprintf(stdout, "Usage: %s [option ...] [command [arg ...]]\n"
 		"Trace library calls of a given program.\n\n"
 		"  -a, --align=COLUMN  align return values in a secific column.\n"
-		"  -A ARRAYLEN         maximum number of array elements to print.\n"
+		"  -A MAXELTS          maximum number of array elements to print.\n"
 		"  -b, --no-signals    don't print signals.\n"
 		"  -c                  count time and calls, and report a summary on exit.\n"
 # ifdef USE_DEMANGLE
 		"  -C, --demangle      decode low-level symbol names into user-level names.\n"
 # endif
-		"  -D, --debug=LEVEL   enable debugging (see -Dh or --debug=help).\n"
+		"  -D, --debug=MASK    enable debugging (see -Dh or --debug=help).\n"
 		"  -Dh, --debug=help   show help on debugging.\n"
-		"  -e expr             modify which events to trace.\n"
+		"  -e FILTER           modify which library calls to trace.\n"
 		"  -f                  trace children (fork() and clone()).\n"
 		"  -F, --config=FILE   load alternate configuration file (may be repeated).\n"
 		"  -h, --help          display this help and exit.\n"
 		"  -i                  print instruction pointer at time of library call.\n"
-		"  -l, --library=FILE  only trace symbols implemented by this library.\n"
+		"  -l, --library=LIBRARY_PATTERN only trace symbols implemented by this library.\n"
 		"  -L                  do NOT display library calls.\n"
 		"  -n, --indent=NR     indent output by NR spaces for each call level nesting.\n"
-		"  -o, --output=FILE   write the trace output to that file.\n"
+		"  -o, --output=FILENAME write the trace output to file with given name.\n"
 		"  -p PID              attach to the process with the process ID pid.\n"
 		"  -r                  print relative timestamps.\n"
-		"  -s STRLEN           specify the maximum string size to print.\n"
-		"  -S                  display system calls.\n"
+		"  -s STRSIZE          specify the maximum string size to print.\n"
+		"  -S                  trace system calls as well as library calls.\n"
 		"  -t, -tt, -ttt       print absolute timestamps.\n"
 		"  -T                  show the time spent inside each call.\n"
 		"  -u USERNAME         run command with the userid, groupid of username.\n"
 		"  -V, --version       output version information and exit.\n"
-#if defined(HAVE_LIBUNWIND)
+#if defined(HAVE_UNWINDER)
 		"  -w, --where=NR      print backtrace showing NR stack frames at most.\n"
-#endif /* defined(HAVE_LIBUNWIND) */
-		"  -x NAME             treat the global NAME like a library subroutine.\n"
+#endif /* defined(HAVE_UNWINDER) */
+		"  -x FILTER           modify which static functions to trace.\n"
 		"\nReport bugs to ltrace-devel@lists.alioth.debian.org\n",
 		progname);
 }
@@ -132,6 +128,8 @@ usage_debug(void) {
 			"\n"
 			"Debugging options are mixed using bitwise-or.\n"
 			"Note that the meanings and values are subject to change.\n"
+			"Also note that these values are used inconsistently in ltrace, and the\n"
+			"only debuglevel that you can rely on is -D77 that will show everything.\n"
 		   );
 }
 
@@ -204,10 +202,10 @@ compile_libname(const char *expr, const char *a_lib, int lib_re_p,
 
 		regex_t lib_re;
 		int status = (lib_re_p ? regcomp : globcomp)(&lib_re, lib, 0);
-		if (status != REG_NOERROR) {
+		if (status != 0) {
 			char buf[100];
 			regerror(status, &lib_re, buf, sizeof buf);
-			fprintf(stderr, "Rule near '%s' will be ignored: %s.\n",
+			fprintf(stderr, "Couldn't compile '%s': %s.\n",
 				expr, buf);
 			return -1;
 		}
@@ -216,7 +214,7 @@ compile_libname(const char *expr, const char *a_lib, int lib_re_p,
 	return 0;
 }
 
-static void
+static int
 add_filter_rule(struct filter *filt, const char *expr,
 		enum filter_rule_type type,
 		const char *a_sym, int sym_re_p,
@@ -226,12 +224,10 @@ add_filter_rule(struct filter *filt, const char *expr,
 	struct filter_lib_matcher *matcher = malloc(sizeof(*matcher));
 
 	if (rule == NULL || matcher == NULL) {
-		fprintf(stderr, "Rule near '%s' will be ignored: %s.\n",
-			expr, strerror(errno));
 	fail:
 		free(rule);
 		free(matcher);
-		return;
+		return -1;
 	}
 
 	regex_t symbol_re;
@@ -246,7 +242,7 @@ add_filter_rule(struct filter *filt, const char *expr,
 		if (status != 0) {
 			char buf[100];
 			regerror(status, &symbol_re, buf, sizeof buf);
-			fprintf(stderr, "Rule near '%s' will be ignored: %s.\n",
+			fprintf(stderr, "Couldn't compile '%s': %s.\n",
 				expr, buf);
 			goto fail;
 		}
@@ -259,6 +255,7 @@ add_filter_rule(struct filter *filt, const char *expr,
 
 	filter_rule_init(rule, type, matcher, symbol_re);
 	filter_add_rule(filt, rule);
+	return 0;
 }
 
 static int
@@ -291,7 +288,7 @@ parse_filter(struct filter *filt, char *expr, int operators)
 	enum filter_rule_type type = FR_ADD;
 
 	while (*expr != 0) {
-		size_t s = strcspn(expr, "-+@" + (operators ? 0 : 2));
+		size_t s = strcspn(expr, &"-+@"[operators ? 0 : 2]);
 		char *symname = expr;
 		char *libname;
 		char *next = expr + s + 1;
@@ -310,7 +307,7 @@ parse_filter(struct filter *filt, char *expr, int operators)
 		} else {
 			assert(expr[s] == '@');
 			expr[s] = 0;
-			s = strcspn(next, "-+" + (operators ? 0 : 2));
+			s = strcspn(next, &"-+"[operators ? 0 : 2]);
 			if (s == 0) {
 				libname = "*";
 				expr = next;
@@ -382,7 +379,7 @@ parse_filter(struct filter *filt, char *expr, int operators)
 }
 
 static struct filter *
-recursive_parse_chain(char *expr, int operators)
+recursive_parse_chain(const char *orig, char *expr, int operators)
 {
 	struct filter *filt = malloc(sizeof(*filt));
 	if (filt == NULL) {
@@ -393,7 +390,7 @@ recursive_parse_chain(char *expr, int operators)
 
 	filter_init(filt);
 	if (parse_filter(filt, expr, operators) < 0) {
-		fprintf(stderr, "Filter '%s' will be ignored.\n", expr);
+		fprintf(stderr, "Filter '%s' will be ignored.\n", orig);
 		free(filt);
 		filt = NULL;
 	}
@@ -422,7 +419,7 @@ parse_filter_chain(const char *expr, struct filter **retp)
 	if (str[0] == '!')
 		str[0] = '-';
 
-	*slist_chase_end(retp) = recursive_parse_chain(str, 1);
+	*slist_chase_end(retp) = recursive_parse_chain(expr, str, 1);
 	free(str);
 }
 
@@ -442,15 +439,89 @@ parse_int(const char *optarg, char opt, int min, int max)
 	return (int)l;
 }
 
+int
+parse_colon_separated_list(const char *paths, struct vect *vec)
+{
+	/* PATHS contains a colon-separated list of directories and
+	 * files to load.  It's modeled after shell PATH variable,
+	 * which doesn't allow escapes.  PYTHONPATH in CPython behaves
+	 * the same way.  So let's follow suit, it makes things easier
+	 * to us.  */
+
+	char *clone = strdup(paths);
+	if (clone == NULL) {
+		fprintf(stderr, "Couldn't parse argument %s: %s.\n",
+			paths, strerror(errno));
+		return -1;
+	}
+
+	/* It's undesirable to use strtok, because we want the string
+	 * "a::b" to have three elements.  */
+	char *tok = clone - 1;
+	char *end = clone + strlen(clone);
+	while (tok < end) {
+		++tok;
+		size_t len = strcspn(tok, ":");
+		tok[len] = 0;
+
+		struct opt_F_t arg = {
+			.pathname = tok,
+			.own_pathname = tok == clone,
+		};
+		if (VECT_PUSHBACK(vec, &arg) < 0)
+			/* Presumably this is not a deal-breaker.  */
+			fprintf(stderr, "Couldn't store component of %s: %s.\n",
+				paths, strerror(errno));
+
+		tok += len;
+	}
+
+	return 0;
+}
+
+void
+opt_F_destroy(struct opt_F_t *entry)
+{
+	if (entry == NULL)
+		return;
+	if (entry->own_pathname)
+		free(entry->pathname);
+}
+
+enum opt_F_kind
+opt_F_get_kind(struct opt_F_t *entry)
+{
+	if (entry->kind == OPT_F_UNKNOWN) {
+		struct stat st;
+		if (lstat(entry->pathname, &st) < 0) {
+			fprintf(stderr, "Couldn't stat %s: %s\n",
+				entry->pathname, strerror(errno));
+			entry->kind = OPT_F_BROKEN;
+		} else if (S_ISDIR(st.st_mode)) {
+			entry->kind = OPT_F_DIR;
+		} else if (S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) {
+			entry->kind = OPT_F_FILE;
+		} else {
+			fprintf(stderr, "%s is neither a regular file, "
+				"nor a directory.\n", entry->pathname);
+			entry->kind = OPT_F_BROKEN;
+		}
+	}
+	assert(entry->kind != OPT_F_UNKNOWN);
+	return entry->kind;
+}
+
 char **
 process_options(int argc, char **argv)
 {
+	VECT_INIT(&opt_F, struct opt_F_t);
+
 	progname = argv[0];
 	options.output = stderr;
 	options.no_signals = 0;
-#if defined(HAVE_LIBUNWIND)
+#if defined(HAVE_UNWINDER)
 	options.bt_depth = -1;
-#endif /* defined(HAVE_LIBUNWIND) */
+#endif /* defined(HAVE_UNWINDER) */
 
 	guess_cols();
 
@@ -459,6 +530,7 @@ process_options(int argc, char **argv)
 	while (1) {
 		int c;
 		char *p;
+#ifdef HAVE_GETOPT_LONG
 		int option_index = 0;
 		static struct option long_options[] = {
 			{"align", 1, 0, 'a'},
@@ -466,28 +538,34 @@ process_options(int argc, char **argv)
 			{"debug", 1, 0, 'D'},
 # ifdef USE_DEMANGLE
 			{"demangle", 0, 0, 'C'},
-#endif
+# endif
 			{"indent", 1, 0, 'n'},
 			{"help", 0, 0, 'h'},
 			{"library", 1, 0, 'l'},
 			{"output", 1, 0, 'o'},
 			{"version", 0, 0, 'V'},
 			{"no-signals", 0, 0, 'b'},
-#if defined(HAVE_LIBUNWIND)
+# if defined(HAVE_UNWINDER)
 			{"where", 1, 0, 'w'},
-#endif /* defined(HAVE_LIBUNWIND) */
+# endif /* defined(HAVE_UNWINDER) */
 			{0, 0, 0, 0}
 		};
-		c = getopt_long(argc, argv, "+cfhiLrStTVb"
-# ifdef USE_DEMANGLE
-				"C"
-# endif
-#if defined(HAVE_LIBUNWIND)
-				"a:A:D:e:F:l:n:o:p:s:u:x:X:w:", long_options,
-#else /* !defined(HAVE_LIBUNWIND) */
-				"a:A:D:e:F:l:n:o:p:s:u:x:X:", long_options,
 #endif
-				&option_index);
+
+		const char *opts = "+"
+#ifdef USE_DEMANGLE
+			"C"
+#endif
+#if defined(HAVE_UNWINDER)
+			"w:"
+#endif
+			"cfhiLrStTVba:A:D:e:F:l:n:o:p:s:u:x:";
+
+#ifdef HAVE_GETOPT_LONG
+		c = getopt_long(argc, argv, opts, long_options, &option_index);
+#else
+		c = getopt(argc, argv, opts);
+#endif
 		if (c == -1) {
 			break;
 		}
@@ -529,23 +607,8 @@ process_options(int argc, char **argv)
 			options.follow = 1;
 			break;
 		case 'F':
-			{
-				struct opt_F_t *tmp = malloc(sizeof(*tmp));
-				if (tmp == NULL) {
-				fail:
-					fprintf(stderr, "%s\n",
-						strerror(errno));
-					free(tmp);
-					exit(1);
-				}
-				tmp->filename = strdup(optarg);
-				if (tmp->filename == NULL)
-					goto fail;
-				tmp->own_filename = 1;
-				tmp->next = opt_F;
-				opt_F = tmp;
-				break;
-			}
+			parse_colon_separated_list(optarg, &opt_F);
+			break;
 		case 'h':
 			usage();
 			exit(0);
@@ -558,7 +621,7 @@ process_options(int argc, char **argv)
 			char buf[patlen + 2];
 			sprintf(buf, "@%s", optarg);
 			*slist_chase_end(&options.export_filter)
-				= recursive_parse_chain(buf, 0);
+				= recursive_parse_chain(buf, buf, 0);
 			break;
 		}
 
@@ -610,17 +673,19 @@ process_options(int argc, char **argv)
 			options.user = optarg;
 			break;
 		case 'V':
-			printf("ltrace version " PACKAGE_VERSION ".\n"
-					"Copyright (C) 1997-2009 Juan Cespedes <cespedes@debian.org>.\n"
-					"This is free software; see the GNU General Public Licence\n"
-					"version 2 or later for copying conditions.  There is NO warranty.\n");
+			printf("ltrace " PACKAGE_VERSION "\n"
+			       "Copyright (C) 2010-2013 Petr Machata, Red Hat Inc.\n"
+			       "Copyright (C) 1997-2009 Juan Cespedes <cespedes@debian.org>.\n"
+			       "License GPLv2+: GNU GPL version 2 or later <http://gnu.org/licenses/gpl.html>\n"
+			       "This is free software: you are free to change and redistribute it.\n"
+			       "There is NO WARRANTY, to the extent permitted by law.\n");
 			exit(0);
 			break;
-#if defined(HAVE_LIBUNWIND)
+#if defined(HAVE_UNWINDER)
 		case 'w':
 			options.bt_depth = parse_int(optarg, 'w', 1, 0);
 			break;
-#endif /* defined(HAVE_LIBUNWIND) */
+#endif /* defined(HAVE_UNWINDER) */
 
 		case 'x':
 			parse_filter_chain(optarg, &options.static_filter);
@@ -632,31 +697,6 @@ process_options(int argc, char **argv)
 	}
 	argc -= optind;
 	argv += optind;
-
-	if (!opt_F) {
-		opt_F = malloc(sizeof(struct opt_F_t));
-		opt_F->next = malloc(sizeof(struct opt_F_t));
-		opt_F->next->next = NULL;
-		opt_F->filename = USER_CONFIG_FILE;
-		opt_F->own_filename = 0;
-		opt_F->next->filename = SYSTEM_CONFIG_FILE;
-		opt_F->next->own_filename = 0;
-	}
-	/* Reverse the config file list since it was built by
-	 * prepending, and it would make more sense to process the
-	 * files in the order they were given. Probably it would make
-	 * more sense to keep a tail pointer instead? */
-	{
-		struct opt_F_t *egg = NULL;
-		struct opt_F_t *chicken;
-		while (opt_F) {
-			chicken = opt_F->next;
-			opt_F->next = egg;
-			egg = opt_F;
-			opt_F = chicken;
-		}
-		opt_F = egg;
-	}
 
 	/* If neither -e, nor -l, nor -L are used, set default -e.
 	 * Use @MAIN for now, as that's what ltrace used to have in

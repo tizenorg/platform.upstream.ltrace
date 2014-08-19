@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011,2012,2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 1998,2004,2007,2008,2009 Juan Cespedes
  * Copyright (C) 2006 Ian Wienand
  * Copyright (C) 2006 Steve Fink
@@ -21,6 +21,8 @@
  * 02110-1301 USA
  */
 
+#define _XOPEN_SOURCE /* For wcwidth from wchar.h.  */
+
 #include <ctype.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -28,13 +30,15 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <wchar.h>
 
-#include "proc.h"
-#include "lens_default.h"
-#include "value.h"
+#include "bits.h"
 #include "expr.h"
+#include "lens_default.h"
+#include "options.h"
+#include "output.h"
 #include "type.h"
-#include "common.h"
+#include "value.h"
 #include "zero.h"
 
 #define READER(NAME, TYPE)						\
@@ -122,13 +126,8 @@ acc_fprintf(int *countp, FILE *stream, const char *format, ...)
 }
 
 static int
-format_char(FILE *stream, struct value *value, struct value_dict *arguments)
+print_char(FILE *stream, int c)
 {
-	long lc;
-	if (value_extract_word(value, &lc, arguments) < 0)
-		return -1;
-	int c = (int)lc;
-
 	const char *fmt;
 	switch (c) {
 	case -1:
@@ -172,13 +171,23 @@ format_char(FILE *stream, struct value *value, struct value_dict *arguments)
 }
 
 static int
-format_naked_char(FILE *stream, struct value *value,
-		  struct value_dict *arguments)
+format_char(FILE *stream, struct value *value, struct value_dict *arguments)
+{
+	long lc;
+	if (value_extract_word(value, &lc, arguments) < 0)
+		return -1;
+	return print_char(stream, (int) lc);
+}
+
+static int
+format_naked(FILE *stream, struct value *value,
+	     struct value_dict *arguments,
+	     int (*what)(FILE *, struct value *, struct value_dict *))
 {
 	int written = 0;
 	if (acc_fprintf(&written, stream, "'") < 0
 	    || account_output(&written,
-			      format_char(stream, value, arguments)) < 0
+			      what(stream, value, arguments)) < 0
 	    || acc_fprintf(&written, stream, "'") < 0)
 		return -1;
 
@@ -255,11 +264,12 @@ format_struct(FILE *stream, struct value *value, struct value_dict *arguments)
 	return written;
 }
 
+static const char null_message[] = "nil";
 int
 format_pointer(FILE *stream, struct value *value, struct value_dict *arguments)
 {
 	if (value_is_zero(value, arguments))
-		return fprintf(stream, "nil");
+		return fprintf(stream, null_message);
 
 	/* The following is for detecting recursion.  We keep track of
 	 * the values that were already displayed.  Each time a
@@ -321,7 +331,7 @@ format_pointer(FILE *stream, struct value *value, struct value_dict *arguments)
 	value_destroy(&element);
 
 done:
-	vect_popback(&pointers);
+	VECT_POPBACK(&pointers, struct value *, NULL, NULL);
 	return o;
 }
 
@@ -337,14 +347,14 @@ done:
  * OPEN, CLOSE, DELIM are opening and closing parenthesis and element
  *    delimiter.
  */
-int
+static int
 format_array(FILE *stream, struct value *value, struct value_dict *arguments,
 	     struct expr_node *length, size_t maxlen, int before,
 	     const char *open, const char *close, const char *delim)
 {
 	/* We need "long" to be long enough to cover the whole address
 	 * space.  */
-	typedef char assert__long_enough_long[-(sizeof(long) < sizeof(void *))];
+	(void)sizeof(char[1 - 2*(sizeof(long) < sizeof(void *))]);
 	long l;
 	if (expr_eval_word(length, value, arguments, &l) < 0)
 		return -1;
@@ -405,7 +415,8 @@ toplevel_format_lens(struct lens *lens, FILE *stream,
 
 	case ARGTYPE_CHAR:
 		if (int_fmt == INT_FMT_default)
-			return format_naked_char(stream, value, arguments);
+			return format_naked(stream, value, arguments,
+					    &format_char);
 		return format_integer(stream, value, int_fmt, arguments);
 
 	case ARGTYPE_FLOAT:
@@ -416,7 +427,9 @@ toplevel_format_lens(struct lens *lens, FILE *stream,
 		return format_struct(stream, value, arguments);
 
 	case ARGTYPE_POINTER:
-		if (value->type->u.array_info.elt_type->type != ARGTYPE_VOID)
+		if (value_is_zero(value, arguments))
+			return fprintf(stream, null_message);
+		if (value->type->u.ptr_info.info->type != ARGTYPE_VOID)
 			return format_pointer(stream, value, arguments);
 		return format_integer(stream, value, INT_FMT_x, arguments);
 
@@ -538,6 +551,51 @@ struct lens bool_lens = {
 	.format_cb = bool_lens_format_cb,
 };
 
+static int
+redispatch_as_array(struct lens *lens, FILE *stream,
+		    struct value *value, struct value_dict *arguments,
+		    int (*cb)(struct lens *, FILE *,
+			      struct value *, struct value_dict *))
+{
+	struct arg_type_info info[2];
+	type_init_array(&info[1], value->type->u.ptr_info.info, 0,
+			expr_node_zero(), 0);
+	type_init_pointer(&info[0], &info[1], 0);
+	info->lens = lens;
+	info->own_lens = 0;
+	struct value tmp;
+	if (value_clone(&tmp, value) < 0)
+		return -1;
+	value_set_type(&tmp, info, 0);
+	int ret = cb(lens, stream, &tmp, arguments);
+	type_destroy(&info[0]);
+	type_destroy(&info[1]);
+	value_destroy(&tmp);
+	return ret;
+}
+
+static int
+format_wchar(FILE *stream, struct value *value, struct value_dict *arguments)
+{
+	long l;
+	if (value_extract_word(value, &l, arguments) < 0)
+		return -1;
+	wchar_t wc = (wchar_t) l;
+	char buf[MB_CUR_MAX + 1];
+
+	int c = wctomb(buf, wc);
+	if (c < 0)
+		return -1;
+	if (c == 1)
+		return print_char(stream, buf[0]);
+
+	buf[c] = 0;
+	if (fprintf(stream, "%s", buf) < 0)
+		return -1;
+
+	c = wcwidth(wc);
+	return c >= 0 ? c : 0;
+}
 
 static int
 string_lens_format_cb(struct lens *lens, FILE *stream,
@@ -550,39 +608,39 @@ string_lens_format_cb(struct lens *lens, FILE *stream,
 		 * I suspect people are so used to the char * C idiom,
 		 * that string(char *) might actually turn up.  So
 		 * let's just support it.  */
-		if (value->type->u.ptr_info.info->type == ARGTYPE_CHAR) {
-			struct arg_type_info info[2];
-			type_init_array(&info[1],
-					value->type->u.ptr_info.info, 0,
-					expr_node_zero(), 0);
-			type_init_pointer(&info[0], &info[1], 0);
-			info->lens = lens;
-			info->own_lens = 0;
-			struct value tmp;
-			if (value_clone(&tmp, value) < 0)
-				return -1;
-			value_set_type(&tmp, info, 0);
-			int ret = string_lens_format_cb(lens, stream, &tmp,
-							arguments);
-			type_destroy(&info[0]);
-			type_destroy(&info[1]);
-			value_destroy(&tmp);
-			return ret;
-		}
+		switch ((int) value->type->u.ptr_info.info->type)
+		case ARGTYPE_CHAR:
+		case ARGTYPE_SHORT:
+		case ARGTYPE_USHORT:
+		case ARGTYPE_INT:
+		case ARGTYPE_UINT:
+		case ARGTYPE_LONG:
+		case ARGTYPE_ULONG:
+			return redispatch_as_array(lens, stream, value,
+						   arguments,
+						   &string_lens_format_cb);
 
-		/* fall-through */
+		/* Otherwise dispatch to whatever the default for the
+		 * pointee is--most likely this will again be us.  */
+		/* Fall through.  */
 	case ARGTYPE_VOID:
 	case ARGTYPE_FLOAT:
 	case ARGTYPE_DOUBLE:
 	case ARGTYPE_STRUCT:
+		return toplevel_format_lens(lens, stream, value,
+					    arguments, INT_FMT_default);
+
 	case ARGTYPE_SHORT:
 	case ARGTYPE_INT:
 	case ARGTYPE_LONG:
 	case ARGTYPE_USHORT:
 	case ARGTYPE_UINT:
 	case ARGTYPE_ULONG:
-		return toplevel_format_lens(lens, stream, value,
-					    arguments, INT_FMT_default);
+		if (value->parent != NULL && value->type->lens == NULL)
+			return format_wchar(stream, value, arguments);
+		else
+			return format_naked(stream, value, arguments,
+					    &format_wchar);
 
 	case ARGTYPE_CHAR:
 		return format_char(stream, value, arguments);
@@ -606,15 +664,6 @@ out_bits(FILE *stream, size_t low, size_t high)
 		return fprintf(stream, "%zd", low);
 	else
 		return fprintf(stream, "%zd-%zd", low, high);
-}
-
-static unsigned
-bitcount(unsigned u)
-{
-	int c = 0;
-	for (; u > 0; u &= u - 1)
-		c++;
-	return c;
 }
 
 static int
@@ -673,7 +722,7 @@ bitvect_lens_format_cb(struct lens *lens, FILE *stream,
 	unsigned neg = bits > sz * 4 ? 0xff : 0x00;
 
 	int o = 0;
-	if (acc_fprintf(&o, stream, "%s<", "~" + (neg == 0x00)) < 0)
+	if (acc_fprintf(&o, stream, "%s<", &"~"[neg == 0x00]) < 0)
 		return -1;
 
 	size_t bitno = 0;

@@ -48,7 +48,7 @@ static Event * delayed_events = NULL;
 static Event * end_delayed_events = NULL;
 
 static enum callback_status
-first (Process * proc, void * data)
+first(struct process *proc, void *data)
 {
 	return CBS_STOP;
 }
@@ -83,12 +83,12 @@ each_qd_event(enum ecb_status (*pred)(Event *, void *), void * data)
 	Event * event;
 	for (event = prev; event != NULL; ) {
 		switch ((*pred)(event, data)) {
-		case ecb_cont:
+		case ECB_CONT:
 			prev = event;
 			event = event->next;
 			continue;
 
-		case ecb_deque:
+		case ECB_DEQUE:
 			debug(DEBUG_FUNCTION, "dequeuing event %d for %d",
 			      event->type,
 			      event->proc != NULL ? event->proc->pid : -1);
@@ -106,7 +106,7 @@ each_qd_event(enum ecb_status (*pred)(Event *, void *), void * data)
 				end_delayed_events = NULL;
 			/* fall-through */
 
-		case ecb_yield:
+		case ECB_YIELD:
 			return event;
 		}
 	}
@@ -120,9 +120,9 @@ event_process_not_reenabling(Event * event, void * data)
 	if (event->proc == NULL
 	    || event->proc->leader == NULL
 	    || event->proc->leader->event_handler == NULL)
-		return ecb_deque;
+		return ECB_DEQUE;
 	else
-		return ecb_cont;
+		return ECB_CONT;
 }
 
 static Event *
@@ -188,7 +188,7 @@ next_event(void)
 		 * now) the pain of figuring this out all over again.
 		 * Petr Machata 2011-11-22.  */
 		int i = 0;
-		for (; i < 100 && process_status(pid) != ps_tracing_stop; ++i) {
+		for (; i < 100 && process_status(pid) != PS_TRACING_STOP; ++i) {
 			debug(2, "waiting for %d to stop", pid);
 			usleep(10000);
 		}
@@ -197,9 +197,10 @@ next_event(void)
 		debug(DEBUG_EVENT, "event: NEW: pid=%d", pid);
 		return &event;
 	}
+
 	get_arch_dep(event.proc);
 	debug(3, "event from pid %u", pid);
-	Process *leader = event.proc->leader;
+	struct process *leader = event.proc->leader;
 
 	/* The process should be stopped after the waitpid call.  But
 	 * when the whole thread group is terminated, we see
@@ -313,7 +314,7 @@ next_event(void)
 	   actually seen this on an Itanium machine on RHEL 5, I don't
 	   remember the exact kernel version anymore.  ia64-sigill.s
 	   in the test suite tests this.  Petr Machata 2011-06-08.  */
-	void * break_address
+	arch_addr_t break_address
 		= event.proc->instruction_pointer - DECR_PC_AFTER_BREAK;
 	if ((stop_signal == SIGSEGV || stop_signal == SIGILL)
 	    && leader != NULL
@@ -341,13 +342,13 @@ static enum ecb_status
 event_for_proc(struct Event *event, void *data)
 {
 	if (event->proc == data)
-		return ecb_deque;
+		return ECB_DEQUE;
 	else
-		return ecb_cont;
+		return ECB_CONT;
 }
 
 void
-delete_events_for(struct Process *proc)
+delete_events_for(struct process *proc)
 {
 	struct Event *event;
 	while ((event = each_qd_event(&event_for_proc, proc)) != NULL)

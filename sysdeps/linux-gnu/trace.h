@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011,2012,2013 Petr Machata, Red Hat Inc.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -18,8 +18,8 @@
  * 02110-1301 USA
  */
 
-#ifndef _LTRACE_LINUX_TRACE_H_
-#define _LTRACE_LINUX_TRACE_H_
+#ifndef LTRACE_LINUX_TRACE_H
+#define LTRACE_LINUX_TRACE_H
 
 #include "proc.h"
 
@@ -59,13 +59,13 @@ struct process_stopping_handler
 	struct event_handler super;
 
 	/* The task that is doing the re-enablement.  */
-	struct Process *task_enabling_breakpoint;
+	struct process *task_enabling_breakpoint;
 
 	/* The pointer being re-enabled.  */
 	struct breakpoint *breakpoint_being_enabled;
 
-	/* Artificial atomic skip breakpoint, if any needed.  */
-	void *atomic_skip_bp_addrs[2];
+	/* Software singlestep breakpoints, if any needed.  */
+	struct breakpoint *sws_bps[2];
 
 	/* When all tasks are stopped, this callback gets called.  */
 	void (*on_all_stopped)(struct process_stopping_handler *);
@@ -84,17 +84,17 @@ struct process_stopping_handler
 
 	enum {
 		/* We are waiting for everyone to land in t/T.  */
-		psh_stopping = 0,
+		PSH_STOPPING = 0,
 
 		/* We are doing the PTRACE_SINGLESTEP.  */
-		psh_singlestep,
+		PSH_SINGLESTEP,
 
 		/* We are waiting for all the SIGSTOPs to arrive so
 		 * that we can sink them.  */
-		psh_sinking,
+		PSH_SINKING,
 
 		/* This is for tracking the ugly workaround.  */
-		psh_ugly_workaround,
+		PSH_UGLY_WORKAROUND,
 	} state;
 
 	int exiting;
@@ -108,7 +108,7 @@ struct process_stopping_handler
  * ON_ALL_STOPPED is LINUX_PTRACE_DISABLE_AND_SINGLESTEP, the default
  * for KEEP_STEPPING_P and UGLY_WORKAROUND_P is "no".  */
 int process_install_stopping_handler
-	(struct Process *proc, struct breakpoint *sbp,
+	(struct process *proc, struct breakpoint *sbp,
 	 void (*on_all_stopped)(struct process_stopping_handler *),
 	 enum callback_status (*keep_stepping_p)
 		 (struct process_stopping_handler *),
@@ -118,4 +118,37 @@ int process_install_stopping_handler
 void linux_ptrace_disable_and_singlestep(struct process_stopping_handler *self);
 void linux_ptrace_disable_and_continue(struct process_stopping_handler *self);
 
-#endif /* _LTRACE_LINUX_TRACE_H_ */
+/* When main binary needs to call an IFUNC function defined in the
+ * binary itself, a PLT entry is set up so that dynamic linker can get
+ * involved and resolve the symbol.  But unlike other PLT relocation,
+ * this one can't rely on symbol table being available.  So it doesn't
+ * reference the symbol by its name, but by its address, and
+ * correspondingly, has another type.  When arch backend wishes to
+ * support these IRELATIVE relocations, it should override
+ * arch_elf_add_plt_entry and dispatch to this function for IRELATIVE
+ * relocations.
+ *
+ * This function behaves as arch_elf_add_plt_entry, except that it
+ * doesn't take name for a parameter, but instead looks up the name in
+ * symbol tables in LTE.  */
+enum plt_status linux_elf_add_plt_entry_irelative(struct process *proc,
+						  struct ltelf *lte,
+						  GElf_Rela *rela, size_t ndx,
+						  struct library_symbol **ret);
+
+/* Service routine of the above.  Determines a name corresponding to
+ * ADDR, or invents a new one.  Returns NULL on failures, otherwise it
+ * returns a malloc'd pointer that the caller is responsible for
+ * freeing.  */
+char *linux_elf_find_irelative_name(struct ltelf *lte, GElf_Addr addr);
+
+/* Returns ${NAME}.IFUNC in a newly-malloc'd block, or NULL on
+ * failures.  */
+char *linux_append_IFUNC_to_name(const char *name);
+
+/* Returns a statically allocated prototype that represents the
+ * prototype "void *()".  Never fails.  */
+struct prototype *linux_IFUNC_prototype(void);
+
+
+#endif /* LTRACE_LINUX_TRACE_H */

@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011,2012,2013 Petr Machata, Red Hat Inc.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -129,9 +129,31 @@ vect_pushback(struct vect *vec, void *eltp)
 }
 
 void
-vect_popback(struct vect *vec)
+vect_erase(struct vect *vec, size_t start, size_t end,
+	   void (*dtor)(void *emt, void *data), void *data)
 {
-	vec->size--;
+	assert(start < vect_size(vec) || start == 0);
+	assert(end <= vect_size(vec));
+
+	/* First, destroy the elements that are to be erased.  */
+	if (dtor != NULL) {
+		size_t i;
+		for (i = start; i < end; ++i)
+			dtor(slot(vec, i), data);
+	}
+
+	/* Now move the tail forward and adjust size.  */
+	memmove(slot(vec, start), slot(vec, end),
+		slot(vec, vec->size) - slot(vec, end));
+	vec->size -= end - start;
+}
+
+void
+vect_popback(struct vect *vec,
+	     void (*dtor)(void *emt, void *data), void *data)
+{
+	assert(vect_size(vec) > 0);
+	vect_erase(vec, vect_size(vec)-1, vect_size(vec), dtor, data);
 }
 
 void
@@ -140,12 +162,8 @@ vect_destroy(struct vect *vec, void (*dtor)(void *emt, void *data), void *data)
 	if (vec == NULL)
 		return;
 
-	if (dtor != NULL) {
-		size_t i;
-		size_t sz = vect_size(vec);
-		for (i = 0; i < sz; ++i)
-			dtor(slot(vec, i), data);
-	}
+	vect_erase(vec, 0, vect_size(vec), dtor, data);
+	assert(vect_size(vec) == 0);
 	free(vec->data);
 }
 
@@ -169,4 +187,24 @@ vect_each(struct vect *vec, void *start_after,
 	}
 
 	return NULL;
+}
+
+void
+vect_qsort(struct vect *vec, int (*compar)(const void *, const void *))
+{
+	qsort(vec->data, vec->size, vec->elt_size, compar);
+}
+
+const void *
+vect_each_cst(const struct vect *vec, const void *start_after,
+	      enum callback_status (*cb)(const void *, void *), void *data)
+{
+	return vect_each((struct vect *)vec, (void *)start_after,
+			 (void *)cb, data);
+}
+
+void
+vect_dtor_string(char **key, void *data)
+{
+	free(*key);
 }

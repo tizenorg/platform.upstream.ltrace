@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2007, 2008, 2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2007,2008,2012,2013 Petr Machata, Red Hat Inc.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -27,13 +27,11 @@
 static ssize_t
 match_character_class(const char *glob, size_t length, size_t from)
 {
-	size_t i;
-	if (length > 0)
-		for (i = from + 2; i < length - 1 && glob[++i] != ':'; )
-			;
-	if (i >= length || glob[++i] != ']')
+	assert(length > 0);
+	const char *colon = memchr(glob + from + 2, ':', length - 1);
+	if (colon == NULL || colon[1] != ']')
 		return -1;
-	return i;
+	return colon - glob;
 }
 
 static ssize_t
@@ -63,14 +61,9 @@ match_brack(const char *glob, size_t length, size_t from, int *exclmp)
 	}
 	++i; /* skip any character, including [ or ]  */
 
-	int escape = 0;
 	for (; i < length; ++i) {
 		char c = glob[i];
-		if (escape) {
-			++i;
-			escape = 0;
-
-		} else if (c == '[' && glob[i + 1] == ':') {
+		if (c == '[' && glob[i + 1] == ':') {
 			ssize_t j = match_character_class(glob, length, i);
 			if (j < 0)
 				goto fail;
@@ -180,7 +173,7 @@ glob_to_regex(const char *glob, char **retp)
 			goto fail;
 	}
 	*retp = buf;
-	return REG_NOERROR;
+	return 0;
 }
 
 int
@@ -188,7 +181,7 @@ globcomp(regex_t *preg, const char *glob, int cflags)
 {
 	char *regex = NULL;
 	int status = glob_to_regex(glob, &regex);
-	if (status != REG_NOERROR)
+	if (status != 0)
 		return status;
 	assert(regex != NULL);
 	status = regcomp(preg, regex, cflags);

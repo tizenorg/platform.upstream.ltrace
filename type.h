@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011,2012,2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 1997-2009 Juan Cespedes
  *
  * This program is free software; you can redistribute it and/or
@@ -70,6 +70,7 @@ struct arg_type_info {
  * struct, or pointer.  Each call with the same TYPE yields the same
  * arg_type_info pointer.  */
 struct arg_type_info *type_get_simple(enum arg_type type);
+struct arg_type_info *type_get_voidptr(void);
 
 /* Initialize INFO so it becomes ARGTYPE_STRUCT.  The created
  * structure contains no fields.  Use type_struct_add to populate the
@@ -110,12 +111,16 @@ void type_init_pointer(struct arg_type_info *info,
  * itself.  */
 void type_destroy(struct arg_type_info *info);
 
+/* Copy type INFO into the area pointed to by RETP.  Return 0 on
+ * success or a negative value on failure.  */
+int type_clone(struct arg_type_info *retp, const struct arg_type_info *info);
+
 /* Compute a size of given type.  Return (size_t)-1 for error.  */
-size_t type_sizeof(struct Process *proc, struct arg_type_info *type);
+size_t type_sizeof(struct process *proc, struct arg_type_info *type);
 
 /* Compute an alignment necessary for elements of this type.  Return
  * (size_t)-1 for error.  */
-size_t type_alignof(struct Process *proc, struct arg_type_info *type);
+size_t type_alignof(struct process *proc, struct arg_type_info *type);
 
 /* Align value SZ to ALIGNMENT and return the result.  */
 size_t align(size_t sz, size_t alignment);
@@ -126,7 +131,7 @@ struct arg_type_info *type_element(struct arg_type_info *type, size_t elt);
 
 /* Compute an offset of EMT-th element of type TYPE.  This works for
  * arrays and structures.  Return (size_t)-1 for error.  */
-size_t type_offsetof(struct Process *proc,
+size_t type_offsetof(struct process *proc,
 		     struct arg_type_info *type, size_t elt);
 
 /* Whether TYPE is an integral type as defined by the C standard.  */
@@ -141,5 +146,14 @@ int type_is_signed(enum arg_type type);
  * ARGTYPE_STRUCT whose sole member is a floating point equivalent
  * type.  */
 struct arg_type_info *type_get_fp_equivalent(struct arg_type_info *info);
+
+/* If INFO is homogeneous floating-point aggregate, return the
+ * corresponding floating point type, and set *COUNTP to number of
+ * fields of the structure.  Otherwise return NULL.  INFO is a HFA if
+ * it's an aggregate whose each field is either a HFA, or a
+ * floating-point type.  */
+struct arg_type_info *type_get_hfa_type(struct arg_type_info *info,
+					size_t *countp);
+
 
 #endif /* TYPE_H */

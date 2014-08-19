@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011,2012,2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 2010 Joe Damato
  * Copyright (C) 2009 Juan Cespedes
  *
@@ -39,50 +39,20 @@
 #include "proc.h"
 #include "forward.h"
 
-#if defined HAVE_LIBSUPC__ || defined HAVE_LIBSTDC__
-# define USE_CXA_DEMANGLE
-#endif
-#if defined HAVE_LIBIBERTY || defined USE_CXA_DEMANGLE
-# define USE_DEMANGLE
-#endif
-
 extern char * command;
 
 extern int exiting;  /* =1 if we have to exit ASAP */
 
-typedef struct Function Function;
-struct Function {
-	const char * name;
-	struct param *params;
-	struct arg_type_info *return_info;
-	int own_return_info;
-	size_t num_params;
-	Function * next;
-};
-
-extern Function * list_of_functions;
 extern char *PLTs_initialized_by_here;
-
-struct opt_c_struct {
-	int count;
-	struct timeval tv;
-};
 
 #include "options.h"
 #include "output.h"
-#ifdef USE_DEMANGLE
-#include "demangle.h"
-#endif
-
-extern Dict * dict_opt_c;
 
 /* Events  */
 extern Event * next_event(void);
 extern void handle_event(Event * event);
 
 extern pid_t execute_program(const char * command, char ** argv);
-
-extern void show_summary(void);
 
 struct breakpoint;
 struct library_symbol;
@@ -93,5 +63,10 @@ struct library_symbol;
  * failure.  */
 int format_argument(FILE *stream, struct value *value,
 		    struct value_dict *arguments);
+
+/* Set *RET to either a duplicate of STR (if WHETHER), or STR
+ * (otherwise).  Return 0 on success or a negative value on failure.
+ * The duplication is not done if STR is NULL.  */
+int strdup_if(const char **ret, const char *str, int whether);
 
 #endif

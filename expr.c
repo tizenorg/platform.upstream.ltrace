@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011,2012,2013 Petr Machata, Red Hat Inc.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -21,7 +21,6 @@
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
-#include <error.h>
 #include <stdlib.h>
 
 #include "expr.h"
@@ -166,6 +165,85 @@ expr_destroy(struct expr_node *node)
 	case EXPR_OP_CALL1:
 		release_expr(node->lhs, node->own_lhs);
 		return;
+	}
+
+	assert(!"Invalid value of node kind");
+	abort();
+}
+
+static int
+expr_alloc_and_clone(struct expr_node **retpp, struct expr_node *node, int own)
+{
+	*retpp = node;
+	if (own) {
+		*retpp = malloc(sizeof **retpp);
+		if (*retpp == NULL || expr_clone(*retpp, node) < 0) {
+			free(*retpp);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+int
+expr_clone(struct expr_node *retp, const struct expr_node *node)
+{
+	*retp = *node;
+
+	switch (node->kind) {
+		struct expr_node *nlhs;
+		struct expr_node *nrhs;
+
+	case EXPR_OP_ARGNO:
+	case EXPR_OP_SELF:
+		return 0;
+
+	case EXPR_OP_CONST:
+		return value_clone(&retp->u.value, &node->u.value);
+
+	case EXPR_OP_NAMED:
+		if (node->u.name.own
+		    && (retp->u.name.s = strdup(node->u.name.s)) == NULL)
+			return -1;
+		return 0;
+
+	case EXPR_OP_INDEX:
+		if (expr_alloc_and_clone(&nlhs, node->lhs, node->own_lhs) < 0)
+			return -1;
+
+		if (expr_alloc_and_clone(&nrhs, node->u.node.n,
+					 node->u.node.own) < 0) {
+			if (nlhs != node->lhs) {
+				expr_destroy(nlhs);
+				free(nlhs);
+			}
+			return -1;
+		}
+
+		retp->lhs = nlhs;
+		retp->u.node.n = nrhs;
+		return 0;
+
+	case EXPR_OP_CALL2:
+		if (expr_alloc_and_clone(&nrhs, node->u.call.rhs,
+					 node->u.call.own_rhs) < 0)
+			return -1;
+		retp->u.call.rhs = nrhs;
+		/* Fall through.  */
+
+	case EXPR_OP_UP:
+	case EXPR_OP_CALL1:
+		if (expr_alloc_and_clone(&nlhs, node->lhs, node->own_lhs) < 0) {
+			if (node->kind == EXPR_OP_CALL2
+			    && node->u.call.own_rhs) {
+				expr_destroy(nrhs);
+				free(nrhs);
+				return -1;
+			}
+		}
+
+		retp->lhs = nlhs;
+		return 0;
 	}
 
 	assert(!"Invalid value of node kind");
@@ -327,12 +405,11 @@ expr_eval_constant(struct expr_node *node, long *valuep)
 struct expr_node *
 expr_self(void)
 {
-	static struct expr_node *node = NULL;
-	if (node == NULL) {
-		node = malloc(sizeof(*node));
-		if (node == NULL)
-			error(1, errno, "malloc expr_self");
-		expr_init_self(node);
+	static struct expr_node *nodep = NULL;
+	if (nodep == NULL) {
+		static struct expr_node node;
+		expr_init_self(&node);
+		nodep = &node;
 	}
-	return node;
+	return nodep;
 }

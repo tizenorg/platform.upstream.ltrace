@@ -1,4 +1,5 @@
 # This file is part of ltrace.
+# Copyright (C) 2014 Petr Machata, Red Hat, Inc.
 # Copyright (C) 2010,2012 Marc Kleine-Budde, Pengutronix
 #
 # This program is free software; you can redistribute it and/or
@@ -16,7 +17,8 @@
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
 # 02110-1301 USA
 
-DIST_SUBDIRS = alpha arm cris ia64 m68k mipsel ppc s390 sparc x86
+DIST_SUBDIRS = aarch64 alpha arm cris ia64 m68k metag mips ppc s390	\
+	       sparc x86
 
 SUBDIRS = \
 	$(HOST_CPU)
@@ -24,11 +26,7 @@ SUBDIRS = \
 noinst_LTLIBRARIES = \
 	../libos.la
 
-___libos_la_SOURCES = \
-	events.c \
-	trace.c \
-	proc.c \
-	breakpoint.c
+___libos_la_SOURCES = events.c trace.c proc.c breakpoint.c hooks.c
 
 ___libos_la_LIBADD = \
 	libcpu.la
