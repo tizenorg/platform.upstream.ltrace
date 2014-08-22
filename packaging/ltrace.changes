@@ -1,3 +1,7 @@
+* Fri Aug 22 2014 Chanho Park <chanho61.park@samsung.com> upstream/0.7.91-142-ga97809a
+- Imported Upstream version 0.7.91
+- Picked all commits from upstream
+
 * Wed Jul 31 2013 Anas Nashif <anas.nashif@intel.com> submit/tizen/20130510.050414@58edbba
 - do not error on warnings
 - do not depend on dejagnu
