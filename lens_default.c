@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011,2012,2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 1998,2004,2007,2008,2009 Juan Cespedes
  * Copyright (C) 2006 Ian Wienand
  * Copyright (C) 2006 Steve Fink
@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bits.h"
 #include "proc.h"
 #include "lens_default.h"
 #include "value.h"
@@ -255,11 +256,12 @@ format_struct(FILE *stream, struct value *value, struct value_dict *arguments)
 	return written;
 }
 
+static const char null_message[] = "nil";
 int
 format_pointer(FILE *stream, struct value *value, struct value_dict *arguments)
 {
 	if (value_is_zero(value, arguments))
-		return fprintf(stream, "nil");
+		return fprintf(stream, null_message);
 
 	/* The following is for detecting recursion.  We keep track of
 	 * the values that were already displayed.  Each time a
@@ -321,7 +323,7 @@ format_pointer(FILE *stream, struct value *value, struct value_dict *arguments)
 	value_destroy(&element);
 
 done:
-	vect_popback(&pointers);
+	VECT_POPBACK(&pointers, struct value *, NULL, NULL);
 	return o;
 }
 
@@ -344,7 +346,7 @@ format_array(FILE *stream, struct value *value, struct value_dict *arguments,
 {
 	/* We need "long" to be long enough to cover the whole address
 	 * space.  */
-	typedef char assert__long_enough_long[-(sizeof(long) < sizeof(void *))];
+	(void)sizeof(char[1 - 2*(sizeof(long) < sizeof(void *))]);
 	long l;
 	if (expr_eval_word(length, value, arguments, &l) < 0)
 		return -1;
@@ -416,6 +418,8 @@ toplevel_format_lens(struct lens *lens, FILE *stream,
 		return format_struct(stream, value, arguments);
 
 	case ARGTYPE_POINTER:
+		if (value_is_zero(value, arguments))
+			return fprintf(stream, null_message);
 		if (value->type->u.array_info.elt_type->type != ARGTYPE_VOID)
 			return format_pointer(stream, value, arguments);
 		return format_integer(stream, value, INT_FMT_x, arguments);
@@ -608,15 +612,6 @@ out_bits(FILE *stream, size_t low, size_t high)
 		return fprintf(stream, "%zd-%zd", low, high);
 }
 
-static unsigned
-bitcount(unsigned u)
-{
-	int c = 0;
-	for (; u > 0; u &= u - 1)
-		c++;
-	return c;
-}
-
 static int
 bitvect_lens_format_cb(struct lens *lens, FILE *stream,
 		       struct value *value, struct value_dict *arguments)
@@ -673,7 +668,7 @@ bitvect_lens_format_cb(struct lens *lens, FILE *stream,
 	unsigned neg = bits > sz * 4 ? 0xff : 0x00;
 
 	int o = 0;
-	if (acc_fprintf(&o, stream, "%s<", "~" + (neg == 0x00)) < 0)
+	if (acc_fprintf(&o, stream, "%s<", &"~"[neg == 0x00]) < 0)
 		return -1;
 
 	size_t bitno = 0;

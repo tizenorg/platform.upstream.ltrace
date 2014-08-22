@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011,2012,2013 Petr Machata, Red Hat Inc.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -96,8 +96,32 @@ int vect_empty(const struct vect *vec);
  * operation was successful, or negative value on error.  */
 int vect_pushback(struct vect *vec, void *eltp);
 
-/* Drop last element of VECP.  */
-void vect_popback(struct vect *vec);
+/* Drop last element of VECP.  This is like calling
+ * vect_erase(VEC, vect_size(VEC)-1, vect_size(VEC), DTOR, DATA);  */
+void vect_popback(struct vect *vec,
+		  void (*dtor)(void *emt, void *data), void *data);
+
+#define VECT_POPBACK(VECP, ELT_TYPE, DTOR, DATA)			\
+	do								\
+		VECT_ERASE((VECP), ELT_TYPE,				\
+			   vect_size(VECP) - 1, vect_size(VECP),	\
+			   DTOR, DATA);					\
+	while (0)
+
+/* Drop elements START (inclusive) to END (non-inclusive) of VECP.  If
+ * DTOR is non-NULL, it is called on each of the removed elements.
+ * DATA is passed verbatim to DTOR.  */
+void vect_erase(struct vect *vec, size_t start, size_t end,
+		void (*dtor)(void *emt, void *data), void *data);
+
+#define VECT_ERASE(VECP, ELT_TYPE, START, END, DTOR, DATA)		\
+	do {								\
+		assert((VECP)->elt_size == sizeof(ELT_TYPE));		\
+		/* Check that DTOR is typed properly.  */		\
+		void (*_dtor_callback)(ELT_TYPE *, void *) = DTOR;	\
+		vect_erase((VECP), (START), (END),			\
+			   (void (*)(void *, void *))_dtor_callback, DATA); \
+	} while (0)
 
 /* Copy element referenced by ELTP to the end of VEC.  See
  * vect_pushback for details.  In addition, make a check whether VECP
@@ -140,11 +164,48 @@ void *vect_each(struct vect *vec, void *start_after,
 		assert((VECP)->elt_size == sizeof(ELT_TYPE));		\
 		/* Check that CB is typed properly.  */			\
 		enum callback_status (*_cb)(ELT_TYPE *, void *) = CB;	\
-		ELT_TYPE *start_after = (START_AFTER);			\
-		(ELT_TYPE *)vect_each((VECP), start_after,		\
+		ELT_TYPE *_start_after = (START_AFTER);			\
+		(ELT_TYPE *)vect_each((VECP), _start_after,		\
 				      (enum callback_status		\
 				       (*)(void *, void *))_cb,		\
 				      DATA);				\
 	})
+
+/* Iterate through vector VEC.  See callback.h for notes on iteration
+ * interfaces.  */
+const void *vect_each_cst(const struct vect *vec, const void *start_after,
+			  enum callback_status (*cb)(const void *, void *),
+			  void *data);
+
+#define VECT_EACH_CST(VECP, ELT_TYPE, START_AFTER, CB, DATA)		\
+	/* xxx GCC-ism necessary to get in the safety latches.  */	\
+	({								\
+		assert((VECP)->elt_size == sizeof(ELT_TYPE));		\
+		/* Check that CB is typed properly.  */			\
+		enum callback_status (*_cb)(const ELT_TYPE *, void *) = CB; \
+		const ELT_TYPE *start_after = (START_AFTER);		\
+		(const ELT_TYPE *)vect_each_cst((VECP), start_after,	\
+						(enum callback_status	\
+						 (*)(const void *,	\
+						     void *))_cb,	\
+						DATA);			\
+	})
+
+/* Call qsort on elements of VECT, with COMPAR as a comparison
+ * function.  */
+void vect_qsort(struct vect *vec, int (*compar)(const void *, const void *));
+
+#define VECT_QSORT(VECP, ELT_TYPE, COMPAR)				\
+	do {								\
+		assert((VECP)->elt_size == sizeof(ELT_TYPE));		\
+		/* Check that CB is typed properly.  */			\
+		int (*_compar)(const ELT_TYPE *, const ELT_TYPE *) = COMPAR; \
+		vect_qsort((VECP),					\
+			   (int (*)(const void *, const void *))_compar); \
+	} while (0)
+
+
+/* A dtor which calls 'free' on elements of a vector.  */
+void vect_dtor_string(char **key, void *data);
 
 #endif /* VECT_H */

@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011,2012,2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 2010 Zachary T Welch, CodeSourcery
  * Copyright (C) 2010 Joe Damato
  * Copyright (C) 1998,2008,2009 Juan Cespedes
@@ -177,44 +177,46 @@ process_status_cb(const char *line, const char *prefix, void *data)
 	} while (0)
 
 	switch (c) {
-	case 'Z': RETURN(ps_zombie);
-	case 't': RETURN(ps_tracing_stop);
+	case 'Z': RETURN(PS_ZOMBIE);
+	case 't': RETURN(PS_TRACING_STOP);
 	case 'T':
 		/* This can be either "T (stopped)" or, for older
 		 * kernels, "T (tracing stop)".  */
 		if (!strcmp(status, "T (stopped)\n"))
-			RETURN(ps_stop);
+			RETURN(PS_STOP);
 		else if (!strcmp(status, "T (tracing stop)\n"))
-			RETURN(ps_tracing_stop);
+			RETURN(PS_TRACING_STOP);
 		else {
 			fprintf(stderr, "Unknown process status: %s",
 				status);
-			RETURN(ps_stop); /* Some sort of stop
+			RETURN(PS_STOP); /* Some sort of stop
 					  * anyway.  */
 		}
 	case 'D':
-	case 'S': RETURN(ps_sleeping);
+	case 'S': RETURN(PS_SLEEPING);
 	}
 
-	RETURN(ps_other);
+	RETURN(PS_OTHER);
 #undef RETURN
 }
 
 enum process_status
 process_status(pid_t pid)
 {
-	enum process_status ret = ps_invalid;
+	enum process_status ret = PS_INVALID;
 	FILE * file = open_status_file(pid);
 	if (file != NULL) {
 		each_line_starting(file, "State:\t", &process_status_cb, &ret);
 		fclose(file);
-		if (ret == ps_invalid)
-			fprintf(stderr, "process_status %d: %s", pid,
-				strerror(errno));
-	} else
+		if (ret == PS_INVALID)
+			fprintf(stderr,
+				"Couldn't determine status of process %d: %s\n",
+				pid, strerror(errno));
+	} else {
 		/* If the file is not present, the process presumably
 		 * exited already.  */
-		ret = ps_zombie;
+		ret = PS_ZOMBIE;
+	}
 
 	return ret;
 }
@@ -231,7 +233,7 @@ int
 process_tasks(pid_t pid, pid_t **ret_tasks, size_t *ret_n)
 {
 	PROC_PID_FILE(fn, "/proc/%d/task", pid);
-	DIR * d = opendir(fn);
+	DIR *d = opendir(fn);
 	if (d == NULL)
 		return -1;
 
@@ -243,7 +245,9 @@ process_tasks(pid_t pid, pid_t **ret_tasks, size_t *ret_n)
 		struct dirent entry;
 		struct dirent *result;
 		if (readdir_r(d, &entry, &result) != 0) {
+		fail:
 			free(tasks);
+			closedir(d);
 			return -1;
 		}
 		if (result == NULL)
@@ -254,14 +258,11 @@ process_tasks(pid_t pid, pid_t **ret_tasks, size_t *ret_n)
 				alloc = alloc > 0 ? (2 * alloc) : 8;
 				pid_t *ntasks = realloc(tasks,
 							sizeof(*tasks) * alloc);
-				if (ntasks == NULL) {
-					free(tasks);
-					return -1;
-				}
+				if (ntasks == NULL)
+					goto fail;
 				tasks = ntasks;
 			}
-			if (n >= alloc)
-				abort();
+			assert(n < alloc);
 			tasks[n++] = npid;
 		}
 	}
@@ -279,7 +280,7 @@ process_tasks(pid_t pid, pid_t **ret_tasks, size_t *ret_n)
  * ABI object, as theorized about somewhere on pmachata/revamp
  * branch.  */
 static void *
-select_32_64(struct Process *proc, void *p32, void *p64)
+select_32_64(struct process *proc, void *p32, void *p64)
 {
 	if (sizeof(long) == 4 || proc->mask_32bit)
 		return p32;
@@ -288,7 +289,7 @@ select_32_64(struct Process *proc, void *p32, void *p64)
 }
 
 static int
-fetch_dyn64(struct Process *proc, arch_addr_t *addr, Elf64_Dyn *ret)
+fetch_dyn64(struct process *proc, arch_addr_t *addr, Elf64_Dyn *ret)
 {
 	if (umovebytes(proc, *addr, ret, sizeof(*ret)) != sizeof(*ret))
 		return -1;
@@ -297,7 +298,7 @@ fetch_dyn64(struct Process *proc, arch_addr_t *addr, Elf64_Dyn *ret)
 }
 
 static int
-fetch_dyn32(struct Process *proc, arch_addr_t *addr, Elf64_Dyn *ret)
+fetch_dyn32(struct process *proc, arch_addr_t *addr, Elf64_Dyn *ret)
 {
 	Elf32_Dyn dyn;
 	if (umovebytes(proc, *addr, &dyn, sizeof(dyn)) != sizeof(dyn))
@@ -311,14 +312,14 @@ fetch_dyn32(struct Process *proc, arch_addr_t *addr, Elf64_Dyn *ret)
 }
 
 static int (*
-dyn_fetcher(struct Process *proc))(struct Process *,
+dyn_fetcher(struct process *proc))(struct process *,
 				   arch_addr_t *, Elf64_Dyn *)
 {
 	return select_32_64(proc, fetch_dyn32, fetch_dyn64);
 }
 
 int
-proc_find_dynamic_entry_addr(struct Process *proc, arch_addr_t src_addr,
+proc_find_dynamic_entry_addr(struct process *proc, arch_addr_t src_addr,
 			     int d_tag, arch_addr_t *ret)
 {
 	debug(DEBUG_FUNCTION, "find_dynamic_entry()");
@@ -364,7 +365,7 @@ struct lt_link_map_32 LT_LINK_MAP(32);
 struct lt_link_map_64 LT_LINK_MAP(64);
 
 static int
-fetch_lm64(struct Process *proc, arch_addr_t addr,
+fetch_lm64(struct process *proc, arch_addr_t addr,
 	   struct lt_link_map_64 *ret)
 {
 	if (umovebytes(proc, addr, ret, sizeof(*ret)) != sizeof(*ret))
@@ -373,7 +374,7 @@ fetch_lm64(struct Process *proc, arch_addr_t addr,
 }
 
 static int
-fetch_lm32(struct Process *proc, arch_addr_t addr,
+fetch_lm32(struct process *proc, arch_addr_t addr,
 	   struct lt_link_map_64 *ret)
 {
 	struct lt_link_map_32 lm;
@@ -390,7 +391,7 @@ fetch_lm32(struct Process *proc, arch_addr_t addr,
 }
 
 static int (*
-lm_fetcher(struct Process *proc))(struct Process *,
+lm_fetcher(struct process *proc))(struct process *,
 				  arch_addr_t, struct lt_link_map_64 *)
 {
 	return select_32_64(proc, fetch_lm32, fetch_lm64);
@@ -410,7 +411,7 @@ struct lt_r_debug_32 LT_R_DEBUG(32);
 struct lt_r_debug_64 LT_R_DEBUG(64);
 
 static int
-fetch_rd64(struct Process *proc, arch_addr_t addr,
+fetch_rd64(struct process *proc, arch_addr_t addr,
 	   struct lt_r_debug_64 *ret)
 {
 	if (umovebytes(proc, addr, ret, sizeof(*ret)) != sizeof(*ret))
@@ -419,7 +420,7 @@ fetch_rd64(struct Process *proc, arch_addr_t addr,
 }
 
 static int
-fetch_rd32(struct Process *proc, arch_addr_t addr,
+fetch_rd32(struct process *proc, arch_addr_t addr,
 	   struct lt_r_debug_64 *ret)
 {
 	struct lt_r_debug_32 rd;
@@ -436,7 +437,7 @@ fetch_rd32(struct Process *proc, arch_addr_t addr,
 }
 
 static int (*
-rdebug_fetcher(struct Process *proc))(struct Process *,
+rdebug_fetcher(struct process *proc))(struct process *,
 				      arch_addr_t, struct lt_r_debug_64 *)
 {
 	return select_32_64(proc, fetch_rd32, fetch_rd64);
@@ -463,13 +464,13 @@ fetch_auxv32_entry(int fd, Elf64_auxv_t *ret)
 }
 
 static int (*
-auxv_fetcher(struct Process *proc))(int, Elf64_auxv_t *)
+auxv_fetcher(struct process *proc))(int, Elf64_auxv_t *)
 {
 	return select_32_64(proc, fetch_auxv32_entry, fetch_auxv64_entry);
 }
 
 static void
-crawl_linkmap(struct Process *proc, struct lt_r_debug_64 *dbg)
+crawl_linkmap(struct process *proc, struct lt_r_debug_64 *dbg)
 {
 	debug (DEBUG_FUNCTION, "crawl_linkmap()");
 
@@ -483,7 +484,7 @@ crawl_linkmap(struct Process *proc, struct lt_r_debug_64 *dbg)
 	arch_addr_t addr = (arch_addr_t)(uintptr_t)dbg->r_map;
 
 	while (addr != 0) {
-		struct lt_link_map_64 rlm;
+		struct lt_link_map_64 rlm = {};
 		if (lm_fetcher(proc)(proc, addr, &rlm) < 0) {
 			debug(2, "Unable to read link map");
 			return;
@@ -533,16 +534,19 @@ crawl_linkmap(struct Process *proc, struct lt_r_debug_64 *dbg)
 		struct library *lib = malloc(sizeof(*lib));
 		if (lib == NULL) {
 		fail:
-			if (lib != NULL)
-				library_destroy(lib);
+			free(lib);
 			fprintf(stderr, "Couldn't load ELF object %s: %s\n",
 				lib_name, strerror(errno));
 			continue;
 		}
-		library_init(lib, LT_LIBTYPE_DSO);
 
-		if (ltelf_read_library(lib, proc, lib_name, rlm.l_addr) < 0)
+		if (library_init(lib, LT_LIBTYPE_DSO) < 0)
 			goto fail;
+
+		if (ltelf_read_library(lib, proc, lib_name, rlm.l_addr) < 0) {
+			library_destroy(lib);
+			goto fail;
+		}
 
 		lib->key = key;
 		proc_add_library(proc, lib);
@@ -551,7 +555,7 @@ crawl_linkmap(struct Process *proc, struct lt_r_debug_64 *dbg)
 }
 
 static int
-load_debug_struct(struct Process *proc, struct lt_r_debug_64 *ret)
+load_debug_struct(struct process *proc, struct lt_r_debug_64 *ret)
 {
 	debug(DEBUG_FUNCTION, "load_debug_struct");
 
@@ -564,7 +568,7 @@ load_debug_struct(struct Process *proc, struct lt_r_debug_64 *ret)
 }
 
 static void
-rdebug_bp_on_hit(struct breakpoint *bp, struct Process *proc)
+rdebug_bp_on_hit(struct breakpoint *bp, struct process *proc)
 {
 	debug(DEBUG_FUNCTION, "arch_check_dbg");
 
@@ -595,7 +599,7 @@ rdebug_bp_on_hit(struct breakpoint *bp, struct Process *proc)
 
 #ifndef ARCH_HAVE_FIND_DL_DEBUG
 int
-arch_find_dl_debug(struct Process *proc, arch_addr_t dyn_addr,
+arch_find_dl_debug(struct process *proc, arch_addr_t dyn_addr,
 		   arch_addr_t *ret)
 {
 	return proc_find_dynamic_entry_addr(proc, dyn_addr, DT_DEBUG, ret);
@@ -603,7 +607,7 @@ arch_find_dl_debug(struct Process *proc, arch_addr_t dyn_addr,
 #endif
 
 int
-linkmap_init(struct Process *proc, arch_addr_t dyn_addr)
+linkmap_init(struct process *proc, arch_addr_t dyn_addr)
 {
 	debug(DEBUG_FUNCTION, "linkmap_init(%d, dyn_addr=%p)", proc->pid, dyn_addr);
 
@@ -619,19 +623,29 @@ linkmap_init(struct Process *proc, arch_addr_t dyn_addr)
 		return status;
 	}
 
+	crawl_linkmap(proc, &rdbg);
+
 	/* XXX The double cast should be removed when
 	 * arch_addr_t becomes integral type.  */
 	arch_addr_t addr = (arch_addr_t)(uintptr_t)rdbg.r_brk;
 	if (arch_translate_address_dyn(proc, addr, &addr) < 0)
 		return -1;
 
-	struct breakpoint *rdebug_bp = insert_breakpoint(proc, addr, NULL);
-	static struct bp_callbacks rdebug_callbacks = {
-		.on_hit = rdebug_bp_on_hit,
-	};
-	rdebug_bp->cbs = &rdebug_callbacks;
-
-	crawl_linkmap(proc, &rdbg);
+	struct breakpoint *rdebug_bp = insert_breakpoint_at(proc, addr, NULL);
+	if (rdebug_bp == NULL) {
+		/* This is not fatal, the tracing can continue with
+		 * reduced functionality.  */
+		fprintf(stderr,
+			"Couldn't insert _r_debug breakpoint to %d: %s.\n"
+			"As a result of that, ltrace will not be able to "
+			"detect and trace\nnewly-loaded libraries.\n",
+			proc->pid, strerror(errno));
+	} else {
+		static struct bp_callbacks rdebug_callbacks = {
+			.on_hit = rdebug_bp_on_hit,
+		};
+		rdebug_bp->cbs = &rdebug_callbacks;
+	}
 
 	return 0;
 }
@@ -648,13 +662,13 @@ task_kill (pid_t pid, int sig)
 }
 
 void
-process_removed(struct Process *proc)
+process_removed(struct process *proc)
 {
 	delete_events_for(proc);
 }
 
 int
-process_get_entry(struct Process *proc,
+process_get_entry(struct process *proc,
 		  arch_addr_t *entryp,
 		  arch_addr_t *interp_biasp)
 {
@@ -706,7 +720,7 @@ process_get_entry(struct Process *proc,
 }
 
 int
-os_process_init(struct Process *proc)
+os_process_init(struct process *proc)
 {
 	proc->os.debug_addr = 0;
 	proc->os.debug_state = 0;
@@ -714,19 +728,19 @@ os_process_init(struct Process *proc)
 }
 
 void
-os_process_destroy(struct Process *proc)
+os_process_destroy(struct process *proc)
 {
 }
 
 int
-os_process_clone(struct Process *retp, struct Process *proc)
+os_process_clone(struct process *retp, struct process *proc)
 {
 	retp->os = proc->os;
 	return 0;
 }
 
 int
-os_process_exec(struct Process *proc)
+os_process_exec(struct process *proc)
 {
 	return 0;
 }

@@ -1,5 +1,6 @@
 /*
  * This file is part of ltrace.
+ * Copyright (C) 2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 1998,2002,2004,2008,2009 Juan Cespedes
  *
  * This program is free software; you can redistribute it and/or
@@ -36,26 +37,25 @@
 #endif
 
 void *
-get_instruction_pointer(Process *proc) {
+get_instruction_pointer(struct process *proc)
+{
 	return (void *)ptrace(PTRACE_PEEKUSER, proc->pid, 4 * PT_PC, 0);
 }
 
 void
-set_instruction_pointer(Process *proc, void *addr) {
+set_instruction_pointer(struct process *proc, void *addr)
+{
 	ptrace(PTRACE_POKEUSER, proc->pid, 4 * PT_PC, addr);
 }
 
 void *
-get_stack_pointer(Process *proc) {
+get_stack_pointer(struct process *proc)
+{
 	return (void *)ptrace(PTRACE_PEEKUSER, proc->pid, 4 * PT_USP, 0);
 }
 
 void *
-get_return_addr(Process *proc, void *stack_pointer) {
+get_return_addr(struct process *proc, void *stack_pointer)
+{
 	return (void *)ptrace(PTRACE_PEEKTEXT, proc->pid, stack_pointer, 0);
-}
-
-void
-set_return_addr(Process *proc, void *addr) {
-	ptrace(PTRACE_POKETEXT, proc->pid, proc->stack_pointer, addr);
 }

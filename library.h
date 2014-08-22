@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2012,2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 2006 Paul Gilliam, IBM Corporation
  *
  * This program is free software; you can redistribute it and/or
@@ -23,11 +23,10 @@
 #define _LIBRARY_H_
 
 #include <stdint.h>
-#include "callback.h"
-#include "sysdep.h"
 
-struct Process;
-struct library;
+#include "callback.h"
+#include "forward.h"
+#include "sysdep.h"
 
 enum toplt {
 	LS_TOPLT_NONE = 0,	/* PLT not used for this symbol. */
@@ -35,8 +34,8 @@ enum toplt {
 };
 
 /* Dict interface.  */
-unsigned int target_address_hash(const void *key);
-int target_address_cmp(const void *key1, const void *key2);
+size_t arch_addr_hash(const arch_addr_t *addr);
+int arch_addr_eq(const arch_addr_t *addr1, const arch_addr_t *addr2);
 
 /* For handling -l.  */
 struct library_exported_name {
@@ -51,6 +50,11 @@ struct library_symbol {
 	const char *name;
 	arch_addr_t enter_addr;
 	enum toplt plt_type;
+
+	/* If this is non-NULL, this prototype is used instead of
+	 * looking up one in LIB->protolib.  */
+	struct prototype *proto;
+
 	int own_name : 1;
 
 	/* This is relevant for PLT symbols.  Latent PLT symbols are
@@ -67,6 +71,7 @@ struct library_symbol {
 	int delayed : 1;
 
 	struct arch_library_symbol_data arch;
+	struct os_library_symbol_data os;
 };
 
 /* Init LIBSYM.  NAME will be freed when LIBSYM is destroyed if
@@ -116,6 +121,7 @@ enum callback_status library_symbol_delayed_cb(struct library_symbol *libsym,
 enum library_type {
 	LT_LIBTYPE_MAIN,
 	LT_LIBTYPE_DSO,
+	LT_LIBTYPE_SYSCALL,
 };
 
 /* XXX we might consider sharing libraries across processes.  Things
@@ -151,6 +157,9 @@ struct library {
 	 * enabled.  */
 	struct library_exported_name *exported_names;
 
+	/* Prototype library associated with this library.  */
+	struct protolib *protolib;
+
 	const char *soname;
 	const char *pathname;
 
@@ -160,10 +169,11 @@ struct library {
 	char own_pathname : 1;
 
 	struct arch_library_data arch;
+	struct os_library_data os;
 };
 
 /* Init LIB.  */
-void library_init(struct library *lib, enum library_type type);
+int library_init(struct library *lib, enum library_type type);
 
 /* Initialize RETP to a library identical to LIB.  Symbols are not
  * shared, but copied over.  Returns 0 on success and a negative value
@@ -195,7 +205,7 @@ void library_add_symbol(struct library *lib, struct library_symbol *sym);
 
 /* A function that can be used as proc_each_library callback.  Looks
  * for a library with the name passed in DATA.  PROC is ignored.  */
-enum callback_status library_named_cb(struct Process *proc,
+enum callback_status library_named_cb(struct process *proc,
 				      struct library *lib, void *name);
 
 /* A function that can be used as proc_each_library callback.  Looks
@@ -203,7 +213,7 @@ enum callback_status library_named_cb(struct Process *proc,
  *
  * NOTE: The key is passed as a POINTER to arch_addr_t (that
  * because in general, arch_addr_t doesn't fit in void*).  */
-enum callback_status library_with_key_cb(struct Process *proc,
+enum callback_status library_with_key_cb(struct process *proc,
 					 struct library *lib, void *keyp);
 
 /* XXX this should really be in backend.h (as on pmachata/revamp
@@ -220,7 +230,7 @@ int arch_translate_address(struct ltelf *lte,
 			   arch_addr_t addr, arch_addr_t *ret);
 /* This is the same function as arch_translate_address, except it's
  * used at the point that we don't have ELF available anymore.  */
-int arch_translate_address_dyn(struct Process *proc,
+int arch_translate_address_dyn(struct process *proc,
 			       arch_addr_t addr, arch_addr_t *ret);
 
 #endif /* _LIBRARY_H_ */

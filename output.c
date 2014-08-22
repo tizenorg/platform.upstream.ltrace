@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011,2012,2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 2010 Joe Damato
  * Copyright (C) 1997,1998,1999,2001,2002,2003,2004,2007,2008,2009 Juan Cespedes
  * Copyright (C) 2006 Paul Gilliam, IBM Corporation
@@ -22,10 +22,6 @@
  * 02110-1301 USA
  */
 
-/* glibc before 2.10, eglibc and uClibc all need _GNU_SOURCE defined
- * for open_memstream to become visible.  */
-#define _GNU_SOURCE
-
 #include "config.h"
 
 #include <stdio.h>
@@ -38,34 +34,38 @@
 #include <errno.h>
 #include <assert.h>
 
-#include "common.h"
-#include "proc.h"
+#include "output.h"
+#include "demangle.h"
+#include "fetch.h"
+#include "lens_default.h"
 #include "library.h"
+#include "memstream.h"
+#include "options.h"
+#include "param.h"
+#include "proc.h"
+#include "prototype.h"
 #include "type.h"
 #include "value.h"
 #include "value_dict.h"
-#include "param.h"
-#include "fetch.h"
-#include "lens_default.h"
 
 /* TODO FIXME XXX: include in common.h: */
 extern struct timeval current_time_spent;
 
-Dict *dict_opt_c = NULL;
+struct dict *dict_opt_c = NULL;
 
-static Process *current_proc = 0;
+static struct process *current_proc = 0;
 static size_t current_depth = 0;
 static int current_column = 0;
 
 static void
-output_indent(struct Process *proc)
+output_indent(struct process *proc)
 {
 	int d = options.indent * (proc->callstack_depth - 1);
 	current_column += fprintf(options.output, "%*s", d, "");
 }
 
 static void
-begin_of_line(Process *proc, int is_func, int indent)
+begin_of_line(struct process *proc, int is_func, int indent)
 {
 	current_column = 0;
 	if (!proc) {
@@ -78,11 +78,10 @@ begin_of_line(Process *proc, int is_func, int indent)
 	}
 	if (opt_r) {
 		struct timeval tv;
-		struct timezone tz;
 		static struct timeval old_tv = { 0, 0 };
 		struct timeval diff;
 
-		gettimeofday(&tv, &tz);
+		gettimeofday(&tv, NULL);
 
 		if (old_tv.tv_sec == 0 && old_tv.tv_usec == 0) {
 			old_tv.tv_sec = tv.tv_sec;
@@ -98,16 +97,16 @@ begin_of_line(Process *proc, int is_func, int indent)
 		old_tv.tv_sec = tv.tv_sec;
 		old_tv.tv_usec = tv.tv_usec;
 		current_column += fprintf(options.output, "%3lu.%06d ",
-					  diff.tv_sec, (int)diff.tv_usec);
+					  (unsigned long)diff.tv_sec,
+					  (int)diff.tv_usec);
 	}
 	if (opt_t) {
 		struct timeval tv;
-		struct timezone tz;
-
-		gettimeofday(&tv, &tz);
+		gettimeofday(&tv, NULL);
 		if (opt_t > 2) {
 			current_column += fprintf(options.output, "%lu.%06d ",
-						  tv.tv_sec, (int)tv.tv_usec);
+						  (unsigned long)tv.tv_sec,
+						  (int)tv.tv_usec);
 		} else if (opt_t > 1) {
 			struct tm *tmp = localtime(&tv.tv_sec);
 			current_column +=
@@ -122,12 +121,15 @@ begin_of_line(Process *proc, int is_func, int indent)
 		}
 	}
 	if (opt_i) {
-		if (is_func)
+		if (is_func) {
+			struct callstack_element *stel
+				= &proc->callstack[proc->callstack_depth - 1];
 			current_column += fprintf(options.output, "[%p] ",
-						  proc->return_addr);
-		else
+						  stel->return_addr);
+		} else {
 			current_column += fprintf(options.output, "[%p] ",
 						  proc->instruction_pointer);
+		}
 	}
 	if (options.indent > 0 && indent) {
 		output_indent(proc);
@@ -137,78 +139,123 @@ begin_of_line(Process *proc, int is_func, int indent)
 static struct arg_type_info *
 get_unknown_type(void)
 {
-	static struct arg_type_info *info = NULL;
-	if (info == NULL) {
-		info = malloc(sizeof(*info));
-		if (info == NULL) {
-			report_global_error("malloc: %s", strerror(errno));
-			abort();
-		}
-		*info = *type_get_simple(ARGTYPE_LONG);
-		info->lens = &guess_lens;
-	}
-	return info;
+	static struct arg_type_info *ret = NULL;
+	if (ret != NULL)
+		return ret;
+
+	static struct arg_type_info info;
+	info = *type_get_simple(ARGTYPE_LONG);
+	info.lens = &guess_lens;
+	ret = &info;
+	return ret;
 }
 
 /* The default prototype is: long X(long, long, long, long).  */
-static Function *
+static struct prototype *
 build_default_prototype(void)
 {
-	Function *ret = malloc(sizeof(*ret));
-	size_t i = 0;
-	if (ret == NULL)
-		goto err;
-	memset(ret, 0, sizeof(*ret));
+	static struct prototype *ret = NULL;
+	if (ret != NULL)
+		return ret;
+
+	static struct prototype proto;
+	prototype_init(&proto);
 
 	struct arg_type_info *unknown_type = get_unknown_type();
+	assert(unknown_type != NULL);
+	proto.return_info = unknown_type;
+	proto.own_return_info = 0;
 
-	ret->return_info = unknown_type;
-	ret->own_return_info = 0;
+	struct param unknown_param;
+	param_init_type(&unknown_param, unknown_type, 0);
 
-	ret->num_params = 4;
-	ret->params = malloc(sizeof(*ret->params) * ret->num_params);
-	if (ret->params == NULL)
-		goto err;
+	size_t i;
+	for (i = 0; i < 4; ++i)
+		if (prototype_push_param(&proto, &unknown_param) < 0) {
+			report_global_error("build_default_prototype: %s",
+					    strerror(errno));
+			prototype_destroy(&proto);
+			return NULL;
+		}
 
-	for (i = 0; i < ret->num_params; ++i)
-		param_init_type(&ret->params[i], unknown_type, 0);
-
+	ret = &proto;
 	return ret;
-
-err:
-	report_global_error("malloc: %s", strerror(errno));
-	if (ret->params != NULL) {
-		while (i-- > 0)
-			param_destroy(&ret->params[i]);
-		free(ret->params);
-	}
-
-	free(ret);
-
-	return NULL;
 }
 
-static Function *
-name2func(char const *name) {
-	Function *tmp;
-	const char *str1, *str2;
+static bool
+snip_period(char *buf)
+{
+	char *period = strrchr(buf, '.');
+	if (period != NULL && strcmp(period, ".so") != 0) {
+		*period = 0;
+		return true;
+	} else {
+		return false;
+	}
+}
 
-	for (tmp = list_of_functions; tmp != NULL; tmp = tmp->next) {
-		str1 = tmp->name;
-		str2 = name;
-		if (!strcmp(str1, str2))
-			return tmp;
+static struct prototype *
+library_get_prototype(struct library *lib, const char *name)
+{
+	if (lib->protolib == NULL) {
+		size_t sz = strlen(lib->soname);
+		char buf[sz + 1];
+		memcpy(buf, lib->soname, sz + 1);
+
+		do {
+			if (protolib_cache_maybe_load(&g_protocache, buf, 0,
+						      true, &lib->protolib) < 0)
+				return NULL;
+		} while (lib->protolib == NULL
+			 && lib->type == LT_LIBTYPE_DSO
+			 && snip_period(buf));
+
+		if (lib->protolib == NULL)
+			lib->protolib = protolib_cache_default(&g_protocache,
+							       buf, 0);
+	}
+	if (lib->protolib == NULL)
+		return NULL;
+
+	return protolib_lookup_prototype(lib->protolib, name,
+					 lib->type != LT_LIBTYPE_SYSCALL);
+}
+
+struct find_proto_data {
+	const char *name;
+	struct prototype *ret;
+};
+
+static enum callback_status
+find_proto_cb(struct process *proc, struct library *lib, void *d)
+{
+	struct find_proto_data *data = d;
+	data->ret = library_get_prototype(lib, data->name);
+	return CBS_STOP_IF(data->ret != NULL);
+}
+
+static struct prototype *
+lookup_symbol_prototype(struct process *proc, struct library_symbol *libsym)
+{
+	if (libsym->proto != NULL)
+		return libsym->proto;
+
+	struct library *lib = libsym->lib;
+	if (lib != NULL) {
+		struct find_proto_data data = { libsym->name };
+		data.ret = library_get_prototype(lib, libsym->name);
+		if (data.ret == NULL
+		    && libsym->plt_type == LS_TOPLT_EXEC)
+			proc_each_library(proc, NULL, find_proto_cb, &data);
+		if (data.ret != NULL)
+			return data.ret;
 	}
 
-	static Function *def = NULL;
-	if (def == NULL)
-		def = build_default_prototype();
-
-	return def;
+	return build_default_prototype();
 }
 
 void
-output_line(struct Process *proc, const char *fmt, ...)
+output_line(struct process *proc, const char *fmt, ...)
 {
 	if (options.summary)
 		return;
@@ -248,7 +295,8 @@ output_error(FILE *stream)
 }
 
 static int
-fetch_simple_param(enum tof type, Process *proc, struct fetch_context *context,
+fetch_simple_param(enum tof type, struct process *proc,
+		   struct fetch_context *context,
 		   struct value_dict *arguments,
 		   struct arg_type_info *info, int own,
 		   struct value *valuep)
@@ -290,7 +338,8 @@ fetch_param_stop(struct value_dict *arguments, ssize_t *params_leftp)
 }
 
 static int
-fetch_param_pack(enum tof type, Process *proc, struct fetch_context *context,
+fetch_param_pack(enum tof type, struct process *proc,
+		 struct fetch_context *context,
 		 struct value_dict *arguments, struct param *param,
 		 ssize_t *params_leftp)
 {
@@ -343,7 +392,8 @@ fetch_param_pack(enum tof type, Process *proc, struct fetch_context *context,
 }
 
 static int
-fetch_one_param(enum tof type, Process *proc, struct fetch_context *context,
+fetch_one_param(enum tof type, struct process *proc,
+		struct fetch_context *context,
 		struct value_dict *arguments, struct param *param,
 		ssize_t *params_leftp)
 {
@@ -371,15 +421,36 @@ fetch_one_param(enum tof type, Process *proc, struct fetch_context *context,
 	abort();
 }
 
-static int
-fetch_params(enum tof type, Process *proc, struct fetch_context *context,
-	     struct value_dict *arguments, Function *func, ssize_t *params_leftp)
+struct fetch_one_param_data
 {
-	size_t i;
-	for (i = 0; i < func->num_params; ++i)
-		if (fetch_one_param(type, proc, context, arguments,
-				    &func->params[i], params_leftp) < 0)
-			return -1;
+	struct process *proc;
+	struct fetch_context *context;
+	struct value_dict *arguments;
+	ssize_t *params_leftp;
+	enum tof tof;
+};
+
+static enum callback_status
+fetch_one_param_cb(struct prototype *proto, struct param *param, void *data)
+{
+	struct fetch_one_param_data *cb_data = data;
+	return CBS_STOP_IF(fetch_one_param(cb_data->tof, cb_data->proc,
+					   cb_data->context,
+					   cb_data->arguments, param,
+					   cb_data->params_leftp) < 0);
+}
+
+static int
+fetch_params(enum tof type, struct process *proc,
+	     struct fetch_context *context,
+	     struct value_dict *arguments, struct prototype *func,
+	     ssize_t *params_leftp)
+{
+	struct fetch_one_param_data cb_data
+		= { proc, context, arguments, params_leftp, type };
+	if (prototype_each_param(func, NULL,
+				 &fetch_one_param_cb, &cb_data) != NULL)
+		return -1;
 
 	/* Implicit stop at the end of parameter list.  */
 	fetch_param_stop(arguments, params_leftp);
@@ -424,12 +495,9 @@ output_params(struct value_dict *arguments, size_t start, size_t end,
 }
 
 void
-output_left(enum tof type, struct Process *proc,
+output_left(enum tof type, struct process *proc,
 	    struct library_symbol *libsym)
 {
-	const char *function_name = libsym->name;
-	Function *func;
-
 	if (options.summary) {
 		return;
 	}
@@ -447,10 +515,10 @@ output_left(enum tof type, struct Process *proc,
 			       fprintf(options.output, "%s->",
 				       libsym->lib->soname));
 
-	const char *name = function_name;
+	const char *name = libsym->name;
 #ifdef USE_DEMANGLE
 	if (options.demangle)
-		name = my_demangle(function_name);
+		name = my_demangle(libsym->name);
 #endif
 	if (account_output(&current_column,
 			   fprintf(options.output, "%s", name)) < 0)
@@ -467,17 +535,23 @@ output_left(enum tof type, struct Process *proc,
 
 	account_output(&current_column, fprintf(options.output, "("));
 
-	func = name2func(function_name);
+	struct prototype *func = lookup_symbol_prototype(proc, libsym);
 	if (func == NULL) {
+	fail:
 		account_output(&current_column, fprintf(options.output, "???"));
 		return;
 	}
 
 	struct fetch_context *context = fetch_arg_init(type, proc,
 						       func->return_info);
+	if (context == NULL)
+		goto fail;
+
 	struct value_dict *arguments = malloc(sizeof(*arguments));
-	if (arguments == NULL)
-		return;
+	if (arguments == NULL) {
+		fetch_arg_done(context);
+		goto fail;
+	}
 	val_dict_init(arguments);
 
 	ssize_t params_left = -1;
@@ -498,34 +572,55 @@ output_left(enum tof type, struct Process *proc,
 	stel->out.need_delim = need_delim;
 }
 
-void
-output_right(enum tof type, struct Process *proc, struct library_symbol *libsym)
+static void
+free_stringp_cb(const char **stringp, void *data)
 {
-	const char *function_name = libsym->name;
-	Function *func = name2func(function_name);
+	free((char *)*stringp);
+}
+
+void
+output_right(enum tof type, struct process *proc, struct library_symbol *libsym)
+{
+	struct prototype *func = lookup_symbol_prototype(proc, libsym);
 	if (func == NULL)
 		return;
 
+again:
 	if (options.summary) {
-		struct opt_c_struct *st;
-		if (!dict_opt_c) {
-			dict_opt_c =
-			    dict_init(dict_key2hash_string,
-				      dict_key_cmp_string);
-		}
-		st = dict_find_entry(dict_opt_c, function_name);
-		if (!st) {
-			char *na;
-			st = malloc(sizeof(struct opt_c_struct));
-			na = strdup(function_name);
-			if (!st || !na) {
-				perror("malloc()");
-				exit(1);
+		if (dict_opt_c == NULL) {
+			dict_opt_c = malloc(sizeof(*dict_opt_c));
+			if (dict_opt_c == NULL) {
+			oom:
+				fprintf(stderr,
+					"Can't allocate memory for "
+					"keeping track of -c.\n");
+				free(dict_opt_c);
+				options.summary = 0;
+				goto again;
 			}
-			st->count = 0;
-			st->tv.tv_sec = st->tv.tv_usec = 0;
-			dict_enter(dict_opt_c, na, st);
+			DICT_INIT(dict_opt_c, char *, struct opt_c_struct,
+				  dict_hash_string, dict_eq_string, NULL);
 		}
+
+		struct opt_c_struct *st
+			= DICT_FIND_REF(dict_opt_c, &libsym->name,
+					struct opt_c_struct);
+		if (st == NULL) {
+			const char *na = strdup(libsym->name);
+			struct opt_c_struct new_st = {.count = 0, .tv = {0, 0}};
+			if (na == NULL
+			    || DICT_INSERT(dict_opt_c, &na, &new_st) < 0) {
+				free((char *)na);
+				DICT_DESTROY(dict_opt_c, const char *,
+					     struct opt_c_struct,
+					     free_stringp_cb, NULL, NULL);
+				goto oom;
+			}
+			st = DICT_FIND_REF(dict_opt_c, &libsym->name,
+					   struct opt_c_struct);
+			assert(st != NULL);
+		}
+
 		if (st->tv.tv_usec + current_time_spent.tv_usec > 1000000) {
 			st->tv.tv_usec += current_time_spent.tv_usec - 1000000;
 			st->tv.tv_sec++;
@@ -534,11 +629,9 @@ output_right(enum tof type, struct Process *proc, struct library_symbol *libsym)
 		}
 		st->count++;
 		st->tv.tv_sec += current_time_spent.tv_sec;
-
-//              fprintf(options.output, "%s <%lu.%06d>\n", function_name,
-//                              current_time_spent.tv_sec, (int)current_time_spent.tv_usec);
 		return;
 	}
+
 	if (current_proc && (current_proc != proc ||
 			    current_depth != proc->callstack_depth)) {
 		fprintf(options.output, " <unfinished ...>\n");
@@ -549,10 +642,11 @@ output_right(enum tof type, struct Process *proc, struct library_symbol *libsym)
 #ifdef USE_DEMANGLE
 		current_column +=
 		    fprintf(options.output, "<... %s resumed> ",
-			    options.demangle ? my_demangle(function_name) : function_name);
+			    options.demangle ? my_demangle(libsym->name)
+			    : libsym->name);
 #else
 		current_column +=
-		    fprintf(options.output, "<... %s resumed> ", function_name);
+		    fprintf(options.output, "<... %s resumed> ", libsym->name);
 #endif
 	}
 
@@ -596,24 +690,54 @@ output_right(enum tof type, struct Process *proc, struct library_symbol *libsym)
 
 	if (opt_T) {
 		fprintf(options.output, " <%lu.%06d>",
-			current_time_spent.tv_sec,
+			(unsigned long)current_time_spent.tv_sec,
 			(int)current_time_spent.tv_usec);
 	}
 	fprintf(options.output, "\n");
 
 #if defined(HAVE_LIBUNWIND)
-	if (options.bt_depth > 0) {
+	if (options.bt_depth > 0
+	    && proc->unwind_priv != NULL
+	    && proc->unwind_as != NULL) {
 		unw_cursor_t cursor;
-		unw_word_t ip, sp;
+		arch_addr_t ip, function_offset;
+		struct library *lib = NULL;
 		int unwind_depth = options.bt_depth;
 		char fn_name[100];
+		const char *lib_name;
+		size_t distance;
 
+		/* Verify that we can safely cast arch_addr_t* to
+		 * unw_word_t*.  */
+		(void)sizeof(char[1 - 2*(sizeof(unw_word_t)
+					!= sizeof(arch_addr_t))]);
 		unw_init_remote(&cursor, proc->unwind_as, proc->unwind_priv);
 		while (unwind_depth) {
-			unw_get_reg(&cursor, UNW_REG_IP, &ip);
-			unw_get_reg(&cursor, UNW_REG_SP, &sp);
-			unw_get_proc_name(&cursor, fn_name, 100, NULL);
-			fprintf(options.output, "\t\t\t%s (ip = 0x%lx)\n", fn_name, (long) ip);
+			unw_get_reg(&cursor, UNW_REG_IP, (unw_word_t *) &ip);
+			unw_get_proc_name(&cursor, fn_name, sizeof(fn_name),
+					(unw_word_t *) &function_offset);
+
+			/* We are looking for the library with the base address
+			 * closest to the current ip.  */
+			lib_name = "unmapped_area";
+			distance = (size_t) -1;
+			lib = proc->libraries;
+			while (lib != NULL) {
+				/* N.B.: Assumes sizeof(size_t) ==
+				 * sizeof(arch_addr_t).
+				 * Keyword: double cast.  */
+				if ((ip >= lib->base) &&
+					    ((size_t)(ip - lib->base)
+					    < distance)) {
+					distance = ip - lib->base;
+					lib_name = lib->pathname;
+				}
+				lib = lib->next;
+			}
+
+			fprintf(options.output, " > %s(%s+0x%p) [%p]\n",
+					lib_name, fn_name, function_offset, ip);
+
 			if (unw_step(&cursor) <= 0)
 				break;
 			unwind_depth--;
@@ -640,18 +764,18 @@ delim_output(FILE *stream, int *need_delimp,
 		o = writer(stream, data);
 
 	} else {
-		char *buf;
-		size_t bufsz;
-		FILE *tmp = open_memstream(&buf, &bufsz);
-		o = writer(tmp, data);
-		fclose(tmp);
-
+		struct memstream ms;
+		if (memstream_init(&ms) < 0)
+			return -1;
+		o = writer(ms.stream, data);
+		if (memstream_close(&ms) < 0)
+			o = -1;
 		if (o > 0 && ((*need_delimp
 			       && account_output(&o, fprintf(stream, ", ")) < 0)
-			      || fwrite(buf, 1, bufsz, stream) != bufsz))
+			      || fwrite(ms.buf, 1, ms.size, stream) != ms.size))
 			o = -1;
 
-		free(buf);
+		memstream_destroy(&ms);
 	}
 
 	if (o < 0)

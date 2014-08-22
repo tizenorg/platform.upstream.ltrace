@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2012,2013 Petr Machata, Red Hat Inc.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -24,10 +24,11 @@
 #include <arch.h>
 #ifndef ARCH_HAVE_ADDRESS_TYPES
 /* We should in general be able to trace 64-bit processes with 32-bit
- * ltrace.  (At least PPC has several PTRACE requests related to
- * tracing 64-on-32, so presumably it should be possible.)  But ltrace
- * is currently hopelessly infested with using void* for host address.
- * So keep with it, for now.  */
+ * ltrace (this is possible on PPC, and generally there should be no
+ * problem tracing x86_64 processes from x32 ltrace, though it isn't
+ * possible from i386 ltrace).  But ltrace is currently hopelessly
+ * infested with using void* for host address.  So keep with it, for
+ * now.  */
 typedef void *arch_addr_t;
 #endif
 
@@ -38,13 +39,28 @@ struct arch_ltelf_data {
 };
 #endif
 
+#ifndef OS_HAVE_BREAKPOINT_DATA
+struct os_breakpoint_data {
+};
+#endif
+
 #ifndef ARCH_HAVE_BREAKPOINT_DATA
 struct arch_breakpoint_data {
 };
 #endif
 
+#ifndef OS_HAVE_LIBRARY_SYMBOL_DATA
+struct os_library_symbol_data {
+};
+#endif
+
 #ifndef ARCH_HAVE_LIBRARY_SYMBOL_DATA
 struct arch_library_symbol_data {
+};
+#endif
+
+#ifndef OS_HAVE_LIBRARY_DATA
+struct os_library_data {
 };
 #endif
 

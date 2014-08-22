@@ -31,6 +31,10 @@ W: http://cespedes.org/
 E: cespedes@debian.org
 D: All development up to 0.5.3
 
+N: Luca Clementi
+E: luca.clementi@gmail.com
+D: stack trace improvement
+
 N: Joe Damato
 E: ice799@gmail.com
 D: libdl support
@@ -105,6 +109,11 @@ D: MIPSel port
 N: Ian Wienand
 E: ianw@gelato.unsw.edu.au
 D: ia64 port
+
+N: Peter Wu
+E: lekensteyn@gmail.com
+W: https://lekensteyn.nl/
+D: Fixes
 
 N: Andrey Zonov
 E: zont@FreeBSD.org

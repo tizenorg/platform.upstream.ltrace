@@ -29,7 +29,7 @@
 #include "backend.h"
 
 static void
-value_common_init(struct value *valp, struct Process *inferior,
+value_common_init(struct value *valp, struct process *inferior,
 		  struct value *parent, struct arg_type_info *type,
 		  int own_type)
 {
@@ -43,7 +43,7 @@ value_common_init(struct value *valp, struct Process *inferior,
 }
 
 void
-value_init(struct value *valp, struct Process *inferior, struct value *parent,
+value_init(struct value *valp, struct process *inferior, struct value *parent,
 	   struct arg_type_info *type, int own_type)
 {
 	assert(inferior != NULL);
@@ -189,15 +189,30 @@ int
 value_clone(struct value *retp, const struct value *val)
 {
 	*retp = *val;
+
+	if (val->own_type) {
+		retp->type = malloc(sizeof(struct arg_type_info));
+		if (type_clone (retp->type, val->type) < 0) {
+			free(retp->type);
+			return -1;
+		}
+	}
+
 	if (val->where == VAL_LOC_COPY) {
 		assert(val->inferior != NULL);
 		size_t size = type_sizeof(val->inferior, val->type);
-		if (size == (size_t)-1)
+		if (size == (size_t)-1) {
+		fail:
+			if (retp->own_type) {
+				type_destroy(retp->type);
+				free(retp->type);
+			}
 			return -1;
+		}
 
 		retp->u.address = malloc(size);
 		if (retp->u.address == NULL)
-			return -1;
+			goto fail;
 
 		memcpy(retp->u.address, val->u.address, size);
 	}
@@ -284,7 +299,7 @@ value_init_deref(struct value *ret_val, struct value *valp)
 
 	/* We need "long" to be long enough to hold platform
 	 * pointers.  */
-	typedef char assert__long_enough_long[-(sizeof(l) < sizeof(void *))];
+	(void)sizeof(char[1 - 2*(sizeof(l) < sizeof(void *))]);
 
 	value_common_init(ret_val, valp->inferior, valp,
 			  valp->type->u.ptr_info.info, 0);

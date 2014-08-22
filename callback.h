@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011,2012,2013 Petr Machata, Red Hat Inc.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License as
@@ -39,6 +39,21 @@
  * thing as CBS_STOP.  There's no provision for returning error
  * states.  Errors need to be signaled to the caller via DATA,
  * together with any other data that the callback needs.
+ *
+ * A richer iteration interface looks like this:
+ *
+ *   struct each_foo_t {
+ *	foo *restart;
+ *	int status;
+ *   } each_foo(foo *start_after,
+ *		enum callback_status (*cb)(foo *f, void *data),
+ *		void *data);
+ *
+ * These provide error handling.  The two-part structure encodes both
+ * the restart cookie and status.  Status of 0 means success, negative
+ * values signify failures.  Status of -1 is dedicated to failures in
+ * user callback (such that the callback returns CBS_FAIL).  Other
+ * negative values signal failures in the iteration mechanism itself.
  */
 enum callback_status {
 	CBS_STOP, /* The iteration should stop.  */
@@ -46,5 +61,8 @@ enum callback_status {
 	CBS_FAIL, /* There was an error.  The iteration should stop
 		   * and return error.  */
 };
+
+#define CBS_STOP_IF(X) ((X) ? CBS_STOP : CBS_CONT)
+#define CBS_CONT_IF(X) ((X) ? CBS_CONT : CBS_STOP)
 
 #endif /* _CALLBACK_H_ */

@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011,2012,2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 1998,2004,2007,2008,2009 Juan Cespedes
  * Copyright (C) 2006 Steve Fink
  * Copyright (C) 2006 Ian Wienand
@@ -168,7 +168,7 @@ form_next_param(struct param_enum *self,
 		type_init_pointer(infop, array, 1);
 
 	} else if (format_type == ARGTYPE_POINTER) {
-		type_init_pointer(infop, elt_info, 1);
+		type_init_pointer(infop, elt_info, 0);
 
 	} else {
 		*infop = *type_get_simple(format_type);
@@ -270,6 +270,7 @@ param_printf_next(struct param_enum *self, struct arg_type_info *infop,
 
 		case 'x': case 'X':
 			lens = &hex_lens;
+			/* Fall through.  */
 		case 'u':
 		uint:
 			format_type = ARGTYPE_UINT;

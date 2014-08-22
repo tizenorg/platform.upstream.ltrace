@@ -1,5 +1,6 @@
 /*
  * This file is part of ltrace.
+ * Copyright (C) 2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 2002,2004,2008,2009 Juan Cespedes
  * Copyright (C) 2009 Juan Cespedes
  * Copyright (C) 2006 Ian Wienand
@@ -45,50 +46,52 @@
 #define PSW_MASK	0x7fffffff
 #endif
 
-void *
-get_instruction_pointer(Process *proc) {
+arch_addr_t
+get_instruction_pointer(struct process *proc)
+{
 	long ret = ptrace(PTRACE_PEEKUSER, proc->pid, PT_PSWADDR, 0) & PSW_MASK;
 #ifdef __s390x__
 	if (proc->mask_32bit)
 		ret &= PSW_MASK31;
 #endif
-	return (void *)ret;
+	/* XXX double cast.  */
+	return (arch_addr_t)ret;
 }
 
 void
-set_instruction_pointer(Process *proc, void *addr) {
+set_instruction_pointer(struct process *proc, arch_addr_t addr)
+{
 #ifdef __s390x__
 	if (proc->mask_32bit)
-		addr = (void *)((long)addr & PSW_MASK31);
+		/* XXX double cast.  */
+		addr = (arch_addr_t)((uintptr_t)addr & PSW_MASK31);
+#else
+	/* XXX double cast.  */
+	addr = (arch_addr_t)((uintptr_t)addr | ~PSW_MASK);
 #endif
 	ptrace(PTRACE_POKEUSER, proc->pid, PT_PSWADDR, addr);
 }
 
-void *
-get_stack_pointer(Process *proc) {
+arch_addr_t
+get_stack_pointer(struct process *proc)
+{
 	long ret = ptrace(PTRACE_PEEKUSER, proc->pid, PT_GPR15, 0) & PSW_MASK;
 #ifdef __s390x__
 	if (proc->mask_32bit)
 		ret &= PSW_MASK31;
 #endif
-	return (void *)ret;
+	/* XXX double cast.  */
+	return (arch_addr_t)ret;
 }
 
-void *
-get_return_addr(Process *proc, void *stack_pointer) {
+arch_addr_t
+get_return_addr(struct process *proc, arch_addr_t stack_pointer)
+{
 	long ret = ptrace(PTRACE_PEEKUSER, proc->pid, PT_GPR14, 0) & PSW_MASK;
 #ifdef __s390x__
 	if (proc->mask_32bit)
 		ret &= PSW_MASK31;
 #endif
-	return (void *)ret;
-}
-
-void
-set_return_addr(Process *proc, void *addr) {
-#ifdef __s390x__
-	if (proc->mask_32bit)
-		addr = (void *)((long)addr & PSW_MASK31);
-#endif
-	ptrace(PTRACE_POKEUSER, proc->pid, PT_GPR14, addr);
+	/* XXX double cast.  */
+	return (arch_addr_t)ret;
 }

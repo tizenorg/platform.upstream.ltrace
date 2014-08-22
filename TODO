@@ -3,13 +3,11 @@
 ** Automatic prototype discovery:
 *** Use debuginfo if available
     Alternatively, use debuginfo to generate configure file.
-*** Demangled identifiers contain partial prototypes themselves
+*** Mangled identifiers contain partial prototypes themselves
+    They don't contain return type info, which can change the
+    parameter passing convention.  We could use it and hope for the
+    best.
 ** Automatically update list of syscalls?
-** Update /etc/ltrace.conf
-   In particular, we could use a config directory, where packages
-   would install their ltrace config scripts.  The config file could
-   be named after SONAME, and automatically read when corresponding
-   library is mapped.
 ** More operating systems (solaris?)
 ** Get rid of EVENT_ARCH_SYSCALL and EVENT_ARCH_SYSRET
 ** Implement displaced tracing
@@ -21,6 +19,10 @@
    reenablement.
 ** Create different ltrace processes to trace different children
 ** Config file syntax
+*** mark some symbols as exported
+    For PLT hits, only exported prototypes would be considered.  For
+    symtab entry point hits, all would be.
+
 *** named arguments
     This would be useful for replacing the arg1, emt2 etc.
 
@@ -57,9 +59,29 @@
 
     Perhaps we should hook to something after all.
 
+*** system call error returns
+
+    This is closely related to above.  Take the following syscall
+    prototype:
+
+    | long read(int,+string0,ulong);
+
+    string0 means the same as string(array(char, zero(retval))*).  But
+    if read returns a negative value, that signifies errno.  But zero
+    takes this at face value and is suspicious:
+
+    | read@SYS(3 <no return ...>
+    | error: maximum array length seems negative
+    | , "\n\003\224\003\n", 4096)                  = -11
+
+    Ideally we would do what strace does, e.g.:
+
+    | read@SYS(3, 0x12345678, 4096)                = -EAGAIN
+
 *** errno tracking
     Some calls result in setting errno.  Somehow mark those, and on
-    failure, show errno.
+    failure, show errno.  System calls return errno as a negative
+    value (see the previous point).
 
 *** second conversions?
     This definitely calls for some general scripting.  The goal is to
@@ -129,10 +151,28 @@
    according to architecture rules.  Maybe this could be achieved by a
    per-arch config file with typedefs such as:
 
-   | typedef ulong = uint8_t |
+   | typedef ulong = uint8_t; |
+
+** Support for ARM/AARCH64 types
+   - ARM and AARCH64 both support half-precision floating point
+     - there are two different half-precision formats, IEEE 754-2008
+       and "alternative".  Both have 10 bits of mantissa and 5 bits of
+       exponent, and differ only in how exponent==0x1F is handled.  In
+       IEEE format, we get NaN's and infinities; in alternative
+       format, this encodes normalized value -1S × 2¹⁶ × (1.mant)
+     - The Floating-Point Control Register, FPCR, controls: — The
+       half-precision format where applicable, FPCR.AHP bit.
+   - AARCH64 supports fixed-point interpretation of {,double}words
+     - e.g. fixed(int, X) (int interpreted as a decimal number with X
+       binary digits of fraction).
+   - AARCH64 supports 128-bit quad words in SIMD
 
 ** Some more functions in vect might be made to take const*
    Or even marked __attribute__((pure)).
+
+** pretty printer support
+   GDB supports python pretty printers.  We migh want to hook this in
+   and use it to format certain types.
 
 * BUGS
 ** After a clone(), syscalls may be seen as sysrets in s390 (see trace.c:syscall_p())

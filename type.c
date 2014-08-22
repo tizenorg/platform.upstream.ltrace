@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2011,2012,2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 2007,2008 Juan Cespedes
  *
  * This program is free software; you can redistribute it and/or
@@ -59,6 +59,19 @@ type_get_simple(enum arg_type type)
 	abort();
 }
 
+struct arg_type_info *
+type_get_voidptr(void)
+{
+	struct arg_type_info *void_info = type_get_simple(ARGTYPE_VOID);
+	static struct arg_type_info *ret;
+	if (ret == NULL) {
+		static struct arg_type_info ptr_info;
+		type_init_pointer(&ptr_info, void_info, 0);
+		ret = &ptr_info;
+	}
+	return ret;
+}
+
 static void
 type_init_common(struct arg_type_info *info, enum arg_type type)
 {
@@ -92,11 +105,7 @@ struct arg_type_info *
 type_struct_get(struct arg_type_info *info, size_t idx)
 {
 	assert(info->type == ARGTYPE_STRUCT);
-	struct struct_field *field = VECT_ELEMENT(&info->u.entries,
-						  struct struct_field, idx);
-	if (field == NULL)
-		return NULL;
-	return field->info;
+	return VECT_ELEMENT(&info->u.entries, struct struct_field, idx)->info;
 }
 
 size_t
@@ -123,7 +132,7 @@ type_struct_destroy(struct arg_type_info *info)
 }
 
 static int
-layout_struct(struct Process *proc, struct arg_type_info *info,
+layout_struct(struct process *proc, struct arg_type_info *info,
 	      size_t *sizep, size_t *alignmentp, size_t *offsetofp)
 {
 	size_t sz = 0;
@@ -253,11 +262,100 @@ type_destroy(struct arg_type_info *info)
 	}
 }
 
+static int
+type_alloc_and_clone(struct arg_type_info **retpp,
+		     struct arg_type_info *info, int own)
+{
+	*retpp = info;
+	if (own) {
+		*retpp = malloc(sizeof **retpp);
+		if (*retpp == NULL || type_clone(*retpp, info) < 0) {
+			free(*retpp);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static enum callback_status
+clone_struct_add_field(const struct struct_field *field, void *data)
+{
+	struct arg_type_info *retp = data;
+	struct arg_type_info *info;
+	if (type_alloc_and_clone(&info, field->info, field->own_info) < 0) {
+	fail:
+		if (info != field->info)
+			free(info);
+		return CBS_STOP;
+	}
+
+	if (type_struct_add(retp, info, field->own_info) < 0) {
+		if (field->own_info)
+			type_destroy(info);
+		goto fail;
+	}
+
+	return CBS_CONT;
+}
+
+int
+type_clone(struct arg_type_info *retp, const struct arg_type_info *info)
+{
+	switch (info->type) {
+	case ARGTYPE_STRUCT:
+		type_init_struct(retp);
+		if (VECT_EACH_CST(&info->u.entries, struct struct_field, NULL,
+				  clone_struct_add_field, retp) != NULL) {
+			type_destroy(retp);
+			return -1;
+		}
+		break;
+
+	case ARGTYPE_ARRAY:;
+		struct arg_type_info *elt_type;
+		if (type_alloc_and_clone(&elt_type, info->u.array_info.elt_type,
+					 info->u.array_info.own_info) < 0)
+			return -1;
+
+		assert(!info->u.array_info.own_length); // XXXXXXX
+		type_init_array(retp, elt_type, info->u.array_info.own_info,
+				info->u.array_info.length,
+				info->u.array_info.own_length);
+		break;
+
+	case ARGTYPE_POINTER:;
+		struct arg_type_info *ninfo;
+		if (type_alloc_and_clone(&ninfo, info->u.ptr_info.info,
+					 info->u.ptr_info.own_info) < 0)
+			return -1;
+		type_init_pointer(retp, ninfo, info->u.ptr_info.own_info);
+		break;
+
+	case ARGTYPE_VOID:
+	case ARGTYPE_INT:
+	case ARGTYPE_UINT:
+	case ARGTYPE_LONG:
+	case ARGTYPE_ULONG:
+	case ARGTYPE_CHAR:
+	case ARGTYPE_SHORT:
+	case ARGTYPE_USHORT:
+	case ARGTYPE_FLOAT:
+	case ARGTYPE_DOUBLE:
+		*retp = *info;
+		break;
+	}
+
+	assert(!info->own_lens);
+	retp->lens = info->lens;
+	retp->own_lens = info->own_lens;
+	return 0;
+}
+
 #ifdef ARCH_HAVE_SIZEOF
-size_t arch_type_sizeof(struct Process *proc, struct arg_type_info * arg);
+size_t arch_type_sizeof(struct process *proc, struct arg_type_info *arg);
 #else
 size_t
-arch_type_sizeof(struct Process *proc, struct arg_type_info * arg)
+arch_type_sizeof(struct process *proc, struct arg_type_info *arg)
 {
 	/* Use default value.  */
 	return (size_t)-2;
@@ -265,10 +363,10 @@ arch_type_sizeof(struct Process *proc, struct arg_type_info * arg)
 #endif
 
 #ifdef ARCH_HAVE_ALIGNOF
-size_t arch_type_alignof(struct Process *proc, struct arg_type_info * arg);
+size_t arch_type_alignof(struct process *proc, struct arg_type_info *arg);
 #else
 size_t
-arch_type_alignof(struct Process *proc, struct arg_type_info * arg)
+arch_type_alignof(struct process *proc, struct arg_type_info *arg)
 {
 	/* Use default value.  */
 	return (size_t)-2;
@@ -289,7 +387,7 @@ align(size_t sz, size_t alignment)
 }
 
 size_t
-type_sizeof(struct Process *proc, struct arg_type_info *type)
+type_sizeof(struct process *proc, struct arg_type_info *type)
 {
 	size_t arch_size = arch_type_sizeof(proc, type);
 	if (arch_size != (size_t)-2)
@@ -359,7 +457,7 @@ type_sizeof(struct Process *proc, struct arg_type_info *type)
 #define alignof(field,st) ((size_t) ((char*) &st.field - (char*) &st))
 
 size_t
-type_alignof(struct Process *proc, struct arg_type_info *type)
+type_alignof(struct process *proc, struct arg_type_info *type)
 {
 	size_t arch_alignment = arch_type_alignof(proc, type);
 	if (arch_alignment != (size_t)-2)
@@ -412,7 +510,7 @@ type_alignof(struct Process *proc, struct arg_type_info *type)
 }
 
 size_t
-type_offsetof(struct Process *proc, struct arg_type_info *type, size_t emt)
+type_offsetof(struct process *proc, struct arg_type_info *type, size_t emt)
 {
 	assert(type->type == ARGTYPE_STRUCT
 	       || type->type == ARGTYPE_ARRAY);
@@ -567,4 +665,40 @@ type_get_fp_equivalent(struct arg_type_info *info)
 		abort();
 	}
 	abort();
+}
+
+struct arg_type_info *
+type_get_hfa_type(struct arg_type_info *info, size_t *countp)
+{
+	assert(info != NULL);
+	if (info->type != ARGTYPE_STRUCT
+	    && info->type != ARGTYPE_ARRAY)
+		return NULL;
+
+	size_t n = type_aggregate_size(info);
+	if (n == (size_t)-1)
+		return NULL;
+
+	struct arg_type_info *ret = NULL;
+	*countp = 0;
+
+	while (n-- > 0) {
+		struct arg_type_info *emt = type_element(info, n);
+
+		size_t emt_count = 1;
+		if (emt->type == ARGTYPE_STRUCT || emt->type == ARGTYPE_ARRAY)
+			emt = type_get_hfa_type(emt, &emt_count);
+		if (emt == NULL)
+			return NULL;
+		if (ret == NULL) {
+			if (emt->type != ARGTYPE_FLOAT
+			    && emt->type != ARGTYPE_DOUBLE)
+				return NULL;
+			ret = emt;
+		}
+		if (emt->type != ret->type)
+			return NULL;
+		*countp += emt_count;
+	}
+	return ret;
 }

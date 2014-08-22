@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2006,2010,2011,2012 Petr Machata, Red Hat Inc.
+ * Copyright (C) 2006,2010,2011,2012,2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 2010 Zachary T Welch, CodeSourcery
  * Copyright (C) 2010 Joe Damato
  * Copyright (C) 1997,1998,2001,2004,2007,2008,2009 Juan Cespedes
@@ -36,10 +36,12 @@
 #include <gelf.h>
 #include <inttypes.h>
 #include <search.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #include "backend.h"
@@ -63,49 +65,50 @@ arch_elf_destroy(struct ltelf *lte)
 }
 #endif
 
-int
-default_elf_add_plt_entry(struct Process *proc, struct ltelf *lte,
-			  const char *a_name, GElf_Rela *rela, size_t ndx,
-			  struct library_symbol **ret)
+#ifndef OS_HAVE_ADD_PLT_ENTRY
+enum plt_status
+os_elf_add_plt_entry(struct process *proc, struct ltelf *lte,
+		     const char *a_name, GElf_Rela *rela, size_t ndx,
+		     struct library_symbol **ret)
 {
-	char *name = strdup(a_name);
-	if (name == NULL) {
-	fail_message:
-		fprintf(stderr, "Couldn't create symbol for PLT entry: %s\n",
-			strerror(errno));
-	fail:
-		free(name);
-		return -1;
-	}
-
-	GElf_Addr addr = arch_plt_sym_val(lte, ndx, rela);
-
-	struct library_symbol *libsym = malloc(sizeof(*libsym));
-	if (libsym == NULL)
-		goto fail_message;
-
-	/* XXX The double cast should be removed when
-	 * arch_addr_t becomes integral type.  */
-	arch_addr_t taddr = (arch_addr_t)
-		(uintptr_t)(addr + lte->bias);
-
-	if (library_symbol_init(libsym, taddr, name, 1, LS_TOPLT_EXEC) < 0) {
-		free(libsym);
-		goto fail;
-	}
-
-	libsym->next = *ret;
-	*ret = libsym;
-	return 0;
+	return PLT_DEFAULT;
 }
+#endif
 
 #ifndef ARCH_HAVE_ADD_PLT_ENTRY
 enum plt_status
-arch_elf_add_plt_entry(struct Process *proc, struct ltelf *lte,
+arch_elf_add_plt_entry(struct process *proc, struct ltelf *lte,
 		       const char *a_name, GElf_Rela *rela, size_t ndx,
 		       struct library_symbol **ret)
 {
-	return plt_default;
+	return PLT_DEFAULT;
+}
+#endif
+
+#ifndef OS_HAVE_ADD_FUNC_ENTRY
+enum plt_status
+os_elf_add_func_entry(struct process *proc, struct ltelf *lte,
+		      const GElf_Sym *sym,
+		      arch_addr_t addr, const char *name,
+		      struct library_symbol **ret)
+{
+	if (GELF_ST_TYPE(sym->st_info) != STT_FUNC) {
+		*ret = NULL;
+		return PLT_OK;
+	} else {
+		return PLT_DEFAULT;
+	}
+}
+#endif
+
+#ifndef ARCH_HAVE_ADD_FUNC_ENTRY
+enum plt_status
+arch_elf_add_func_entry(struct process *proc, struct ltelf *lte,
+			const GElf_Sym *sym,
+			arch_addr_t addr, const char *name,
+			struct library_symbol **ret)
+{
+	return PLT_DEFAULT;
 }
 #endif
 
@@ -140,8 +143,9 @@ elf_get_section_if(struct ltelf *lte, Elf_Scn **tgt_sec, GElf_Shdr *tgt_shdr,
 			return 0;
 		}
 	}
-	return -1;
 
+	*tgt_sec = NULL;
+	return 0;
 }
 
 static int
@@ -202,23 +206,83 @@ elf_get_section_named(struct ltelf *lte, const char *name,
 				  &name_p, &data);
 }
 
-static int
-need_data(Elf_Data *data, GElf_Xword offset, GElf_Xword size)
+static struct elf_each_symbol_t
+each_symbol_in(Elf_Data *symtab, const char *strtab, size_t count,
+	       unsigned i,
+	       enum callback_status (*cb)(GElf_Sym *symbol,
+					  const char *name, void *data),
+	       void *data)
+{
+	for (; i < count; ++i) {
+		GElf_Sym sym;
+		if (gelf_getsym(symtab, i, &sym) == NULL)
+			return (struct elf_each_symbol_t){ i, -2 };
+
+		switch (cb(&sym, strtab + sym.st_name, data)) {
+		case CBS_FAIL:
+			return (struct elf_each_symbol_t){ i, -1 };
+		case CBS_STOP:
+			return (struct elf_each_symbol_t){ i + 1, 0 };
+		case CBS_CONT:
+			break;
+		}
+	}
+
+	return (struct elf_each_symbol_t){ 0, 0 };
+}
+
+/* N.B.: gelf_getsym takes integer argument.  Since negative values
+ * are invalid as indices, we can use the extra bit to encode which
+ * symbol table we are looking into.  ltrace currently doesn't handle
+ * more than two symbol tables anyway, nor does it handle the xindex
+ * stuff.  */
+struct elf_each_symbol_t
+elf_each_symbol(struct ltelf *lte, unsigned start_after,
+		enum callback_status (*cb)(GElf_Sym *symbol,
+					   const char *name, void *data),
+		void *data)
+{
+	unsigned index = start_after == 0 ? 0 : start_after >> 1;
+
+	/* Go through static symbol table first.  */
+	if ((start_after & 0x1) == 0) {
+		struct elf_each_symbol_t st
+			= each_symbol_in(lte->symtab, lte->strtab,
+					 lte->symtab_count, index, cb, data);
+
+		/* If the iteration stopped prematurely, bail out.  */
+		if (st.restart != 0)
+			return ((struct elf_each_symbol_t)
+				{ st.restart << 1, st.status });
+	}
+
+	struct elf_each_symbol_t st
+		= each_symbol_in(lte->dynsym, lte->dynstr, lte->dynsym_count,
+				 index, cb, data);
+	if (st.restart != 0)
+		return ((struct elf_each_symbol_t)
+			{ st.restart << 1 | 0x1, st.status });
+
+	return (struct elf_each_symbol_t){ 0, 0 };
+}
+
+int
+elf_can_read_next(Elf_Data *data, GElf_Xword offset, GElf_Xword size)
 {
 	assert(data != NULL);
 	if (data->d_size < size || offset > data->d_size - size) {
 		debug(1, "Not enough data to read %"PRId64"-byte value"
 		      " at offset %"PRId64".", size, offset);
-		return -1;
+		return 0;
 	}
-	return 0;
+	return 1;
 }
 
 #define DEF_READER(NAME, SIZE)						\
 	int								\
 	NAME(Elf_Data *data, GElf_Xword offset, uint##SIZE##_t *retp)	\
 	{								\
-		if (!need_data(data, offset, SIZE / 8) < 0)		\
+		if (!elf_can_read_next(data, offset, SIZE / 8))		\
 			return -1;					\
 									\
 		if (data->d_buf == NULL) /* NODATA section */ {		\
@@ -235,15 +299,67 @@ need_data(Elf_Data *data, GElf_Xword offset, GElf_Xword size)
 		return 0;						\
 	}
 
+DEF_READER(elf_read_u8, 8)
 DEF_READER(elf_read_u16, 16)
 DEF_READER(elf_read_u32, 32)
 DEF_READER(elf_read_u64, 64)
 
 #undef DEF_READER
 
+#define DEF_READER(NAME, SIZE)						\
+	int								\
+	NAME(Elf_Data *data, GElf_Xword *offset, uint##SIZE##_t *retp)	\
+	{								\
+		int rc = elf_read_u##SIZE(data, *offset, retp);		\
+		if (rc < 0)						\
+			return rc;					\
+		*offset += SIZE / 8;					\
+		return 0;						\
+	}
+
+DEF_READER(elf_read_next_u8, 8)
+DEF_READER(elf_read_next_u16, 16)
+DEF_READER(elf_read_next_u32, 32)
+DEF_READER(elf_read_next_u64, 64)
+
+#undef DEF_READER
+
 int
-open_elf(struct ltelf *lte, const char *filename)
+elf_read_next_uleb128(Elf_Data *data, GElf_Xword *offset, uint64_t *retp)
 {
+	uint64_t result = 0;
+	int shift = 0;
+	int size = 8 * sizeof result;
+
+	while (1) {
+		uint8_t byte;
+		if (elf_read_next_u8(data, offset, &byte) < 0)
+			return -1;
+
+		uint8_t payload = byte & 0x7f;
+		result |= (uint64_t)payload << shift;
+		shift += 7;
+		if (shift > size && byte != 0x1)
+			return -1;
+		if ((byte & 0x80) == 0)
+			break;
+	}
+
+	if (retp != NULL)
+		*retp = result;
+	return 0;
+}
+
+int
+elf_read_uleb128(Elf_Data *data, GElf_Xword offset, uint64_t *retp)
+{
+	return elf_read_next_uleb128(data, &offset, retp);
+}
+
+int
+ltelf_init(struct ltelf *lte, const char *filename)
+{
+	memset(lte, 0, sizeof *lte);
 	lte->fd = open(filename, O_RDONLY);
 	if (lte->fd == -1)
 		return 1;
@@ -293,7 +409,18 @@ open_elf(struct ltelf *lte, const char *filename)
 		exit(EXIT_FAILURE);
 	}
 
+	VECT_INIT(&lte->plt_relocs, GElf_Rela);
+
 	return 0;
+}
+
+void
+ltelf_destroy(struct ltelf *lte)
+{
+	debug(DEBUG_FUNCTION, "close_elf()");
+	elf_end(lte->elf);
+	close(lte->fd);
+	VECT_DESTROY(&lte->plt_relocs, GElf_Rela, NULL, NULL);
 }
 
 static void
@@ -316,7 +443,7 @@ read_symbol_table(struct ltelf *lte, const char *filename,
 	if (scn == NULL || gelf_getshdr(scn, &shdr2) == NULL) {
 		fprintf(stderr, "Couldn't get header of section"
 			" #%d from \"%s\": %s\n",
-			shdr2.sh_link, filename, elf_errmsg(-1));
+			shdr->sh_link, filename, elf_errmsg(-1));
 		exit(EXIT_FAILURE);
 	}
 
@@ -333,13 +460,86 @@ read_symbol_table(struct ltelf *lte, const char *filename,
 }
 
 static int
-do_init_elf(struct ltelf *lte, const char *filename)
+rel_to_rela(struct ltelf *lte, const GElf_Rel *rel, GElf_Rela *rela)
+{
+	rela->r_offset = rel->r_offset;
+	rela->r_info = rel->r_info;
+
+	Elf_Scn *sec;
+	GElf_Shdr shdr;
+	if (elf_get_section_covering(lte, rel->r_offset, &sec, &shdr) < 0
+	    || sec == NULL)
+		return -1;
+
+	Elf_Data *data = elf_loaddata(sec, &shdr);
+	if (data == NULL)
+		return -1;
+
+	GElf_Xword offset = rel->r_offset - shdr.sh_addr - data->d_off;
+	uint64_t value;
+	if (lte->ehdr.e_ident[EI_CLASS] == ELFCLASS32) {
+		uint32_t tmp;
+		if (elf_read_u32(data, offset, &tmp) < 0)
+			return -1;
+		value = tmp;
+	} else if (elf_read_u64(data, offset, &value) < 0) {
+		return -1;
+	}
+
+	rela->r_addend = value;
+	return 0;
+}
+
+int
+elf_read_relocs(struct ltelf *lte, Elf_Scn *scn, GElf_Shdr *shdr,
+		struct vect *rela_vec)
+{
+	if (vect_reserve_additional(rela_vec, lte->ehdr.e_shnum) < 0)
+		return -1;
+
+	Elf_Data *relplt = elf_loaddata(scn, shdr);
+	if (relplt == NULL) {
+		fprintf(stderr, "Couldn't load .rel*.plt data.\n");
+		return -1;
+	}
+
+	if ((shdr->sh_size % shdr->sh_entsize) != 0) {
+		fprintf(stderr, ".rel*.plt size (%" PRIx64 "d) not a multiple "
+			"of its sh_entsize (%" PRIx64 "d).\n",
+			shdr->sh_size, shdr->sh_entsize);
+		return -1;
+	}
+
+	GElf_Xword relplt_count = shdr->sh_size / shdr->sh_entsize;
+	GElf_Xword i;
+	for (i = 0; i < relplt_count; ++i) {
+		GElf_Rela rela;
+		if (relplt->d_type == ELF_T_REL) {
+			GElf_Rel rel;
+			if (gelf_getrel(relplt, i, &rel) == NULL
+			    || rel_to_rela(lte, &rel, &rela) < 0)
+				return -1;
+
+		} else if (gelf_getrela(relplt, i, &rela) == NULL) {
+			return -1;
+		}
+
+		if (VECT_PUSHBACK(rela_vec, &rela) < 0)
+			return -1;
+	}
+
+	return 0;
+}
+
+static int
+ltelf_read_elf(struct ltelf *lte, const char *filename)
 {
 	int i;
 	GElf_Addr relplt_addr = 0;
 	GElf_Addr soname_offset = 0;
+	GElf_Xword relplt_size = 0;
 
-	debug(DEBUG_FUNCTION, "do_init_elf(filename=%s)", filename);
+	debug(DEBUG_FUNCTION, "ltelf_read_elf(filename=%s)", filename);
 	debug(1, "Reading ELF from %s...", filename);
 
 	for (i = 1; i < lte->ehdr.e_shnum; ++i) {
@@ -398,7 +598,7 @@ do_init_elf(struct ltelf *lte, const char *filename)
 				if (dyn.d_tag == DT_JMPREL)
 					relplt_addr = dyn.d_un.d_ptr;
 				else if (dyn.d_tag == DT_PLTRELSZ)
-					lte->relplt_size = dyn.d_un.d_val;
+					relplt_size = dyn.d_un.d_val;
 				else if (dyn.d_tag == DT_SONAME)
 					soname_offset = dyn.d_un.d_val;
 			}
@@ -431,14 +631,9 @@ do_init_elf(struct ltelf *lte, const char *filename)
 
 	if (!relplt_addr || !lte->plt_addr) {
 		debug(1, "%s has no PLT relocations", filename);
-		lte->relplt = NULL;
-		lte->relplt_count = 0;
-	} else if (lte->relplt_size == 0) {
+	} else if (relplt_size == 0) {
 		debug(1, "%s has unknown PLT size", filename);
-		lte->relplt = NULL;
-		lte->relplt_count = 0;
 	} else {
-
 		for (i = 1; i < lte->ehdr.e_shnum; ++i) {
 			Elf_Scn *scn;
 			GElf_Shdr shdr;
@@ -451,12 +646,9 @@ do_init_elf(struct ltelf *lte, const char *filename)
 				exit(EXIT_FAILURE);
 			}
 			if (shdr.sh_addr == relplt_addr
-			    && shdr.sh_size == lte->relplt_size) {
-				lte->relplt = elf_getdata(scn, NULL);
-				lte->relplt_count =
-				    shdr.sh_size / shdr.sh_entsize;
-				if (lte->relplt == NULL
-				    || elf_getdata(scn, lte->relplt) != NULL) {
+			    && shdr.sh_size == relplt_size) {
+				if (elf_read_relocs(lte, scn, &shdr,
+						    &lte->plt_relocs) < 0) {
 					fprintf(stderr, "Couldn't get .rel*.plt"
 						" data from \"%s\": %s\n",
 						filename, elf_errmsg(-1));
@@ -472,51 +664,12 @@ do_init_elf(struct ltelf *lte, const char *filename)
 				filename);
 			exit(EXIT_FAILURE);
 		}
-
-		debug(1, "%s %zd PLT relocations", filename, lte->relplt_count);
 	}
+	debug(1, "%s %zd PLT relocations", filename,
+	      vect_size(&lte->plt_relocs));
 
 	if (soname_offset != 0)
 		lte->soname = lte->dynstr + soname_offset;
-
-	return 0;
-}
-
-void
-do_close_elf(struct ltelf *lte)
-{
-	debug(DEBUG_FUNCTION, "do_close_elf()");
-	arch_elf_destroy(lte);
-	elf_end(lte->elf);
-	close(lte->fd);
-}
-
-int
-elf_get_sym_info(struct ltelf *lte, const char *filename,
-		 size_t sym_index, GElf_Rela *rela, GElf_Sym *sym)
-{
-	int i = sym_index;
-	GElf_Rel rel;
-	void *ret;
-
-	if (lte->relplt->d_type == ELF_T_REL) {
-		ret = gelf_getrel(lte->relplt, i, &rel);
-		rela->r_offset = rel.r_offset;
-		rela->r_info = rel.r_info;
-		rela->r_addend = 0;
-	} else {
-		ret = gelf_getrela(lte->relplt, i, rela);
-	}
-
-	if (ret == NULL
-	    || ELF64_R_SYM(rela->r_info) >= lte->dynsym_count
-	    || gelf_getsym(lte->dynsym, ELF64_R_SYM(rela->r_info),
-			   sym) == NULL) {
-		fprintf(stderr,
-			"Couldn't get relocation from \"%s\": %s\n",
-			filename, elf_errmsg(-1));
-		exit(EXIT_FAILURE);
-	}
 
 	return 0;
 }
@@ -526,9 +679,71 @@ int
 arch_get_sym_info(struct ltelf *lte, const char *filename,
 		  size_t sym_index, GElf_Rela *rela, GElf_Sym *sym)
 {
-	return elf_get_sym_info(lte, filename, sym_index, rela, sym);
+	return gelf_getsym(lte->dynsym,
+			   ELF64_R_SYM(rela->r_info), sym) != NULL ? 0 : -1;
 }
 #endif
+
+int
+default_elf_add_plt_entry(struct process *proc, struct ltelf *lte,
+			  const char *a_name, GElf_Rela *rela, size_t ndx,
+			  struct library_symbol **ret)
+{
+	char *name = strdup(a_name);
+	if (name == NULL) {
+	fail_message:
+		fprintf(stderr, "Couldn't create symbol for PLT entry: %s\n",
+			strerror(errno));
+	fail:
+		free(name);
+		return -1;
+	}
+
+	GElf_Addr addr = arch_plt_sym_val(lte, ndx, rela);
+
+	struct library_symbol *libsym = malloc(sizeof(*libsym));
+	if (libsym == NULL)
+		goto fail_message;
+
+	/* XXX The double cast should be removed when
+	 * arch_addr_t becomes integral type.  */
+	arch_addr_t taddr = (arch_addr_t)
+		(uintptr_t)(addr + lte->bias);
+
+	if (library_symbol_init(libsym, taddr, name, 1, LS_TOPLT_EXEC) < 0) {
+		free(libsym);
+		goto fail;
+	}
+
+	libsym->next = *ret;
+	*ret = libsym;
+	return 0;
+}
+
+int
+elf_add_plt_entry(struct process *proc, struct ltelf *lte,
+		  const char *name, GElf_Rela *rela, size_t idx,
+		  struct library_symbol **ret)
+{
+	enum plt_status plts
+		= arch_elf_add_plt_entry(proc, lte, name, rela, idx, ret);
+
+	if (plts == PLT_DEFAULT)
+		plts = os_elf_add_plt_entry(proc, lte, name, rela, idx, ret);
+
+	switch (plts) {
+	case PLT_DEFAULT:
+		return default_elf_add_plt_entry(proc, lte, name,
+						 rela, idx, ret);
+	case PLT_FAIL:
+		return -1;
+	case PLT_OK:
+		return 0;
+	}
+
+	assert(! "Invalid return from X_elf_add_plt_entry!");
+	abort();
+}
 
 static void
 mark_chain_latent(struct library_symbol *libsym)
@@ -539,51 +754,85 @@ mark_chain_latent(struct library_symbol *libsym)
 	}
 }
 
-static int
-populate_plt(struct Process *proc, const char *filename,
-	     struct ltelf *lte, struct library *lib,
-	     int latent_plts)
+static void
+filter_symbol_chain(struct filter *filter,
+		    struct library_symbol **libsymp, struct library *lib)
 {
+	assert(libsymp != NULL);
+	struct library_symbol **ptr = libsymp;
+	while (*ptr != NULL) {
+		if (filter_matches_symbol(filter, (*ptr)->name, lib)) {
+			ptr = &(*ptr)->next;
+		} else {
+			struct library_symbol *sym = *ptr;
+			*ptr = (*ptr)->next;
+			library_symbol_destroy(sym);
+			free(sym);
+		}
+	}
+}
+
+static int
+populate_plt(struct process *proc, const char *filename,
+	     struct ltelf *lte, struct library *lib)
+{
+	const bool latent_plts = options.export_filter != NULL;
+	const size_t count = vect_size(&lte->plt_relocs);
+
 	size_t i;
-	for (i = 0; i < lte->relplt_count; ++i) {
-		GElf_Rela rela;
+	for (i = 0; i < count; ++i) {
+		GElf_Rela *rela = VECT_ELEMENT(&lte->plt_relocs, GElf_Rela, i);
 		GElf_Sym sym;
 
-		if (arch_get_sym_info(lte, filename, i, &rela, &sym) < 0)
+		switch (arch_get_sym_info(lte, filename, i, rela, &sym)) {
+		default:
+			fprintf(stderr,
+				"Couldn't get relocation for symbol #%zd"
+				" from \"%s\": %s\n",
+				i, filename, elf_errmsg(-1));
+			/* Fall through.  */
+		case 1:
 			continue; /* Skip this entry.  */
+		case 0:
+			break;
+		}
 
 		char const *name = lte->dynstr + sym.st_name;
-
-		/* If the symbol wasn't matched, reject it, unless we
-		 * need to keep latent PLT breakpoints for tracing
-		 * exports.  */
 		int matched = filter_matches_symbol(options.plt_filter,
 						    name, lib);
-		if (!matched && !latent_plts)
-			continue;
 
 		struct library_symbol *libsym = NULL;
-		switch (arch_elf_add_plt_entry(proc, lte, name,
-					       &rela, i, &libsym)) {
-		case plt_default:
-			if (default_elf_add_plt_entry(proc, lte, name,
-						      &rela, i, &libsym) < 0)
-			/* fall-through */
-		case plt_fail:
-				return -1;
-			/* fall-through */
-		case plt_ok:
-			if (libsym != NULL) {
-				/* If we are adding those symbols just
-				 * for tracing exports, mark them all
-				 * latent.  */
-				if (!matched)
-					mark_chain_latent(libsym);
-				library_add_symbol(lib, libsym);
-			}
+		if (elf_add_plt_entry(proc, lte, name, rela, i, &libsym) < 0)
+			return -1;
+
+		/* If we didn't match the PLT entry, filter the chain
+		 * to only include the matching symbols (but include
+		 * all if we are adding latent symbols) to allow
+		 * backends to override the PLT symbol's name.  */
+
+		if (! matched && ! latent_plts)
+			filter_symbol_chain(options.plt_filter, &libsym, lib);
+
+		if (libsym != NULL) {
+			/* If we are adding those symbols just for
+			 * tracing exports, mark them all latent.  */
+			if (! matched && latent_plts)
+				mark_chain_latent(libsym);
+			library_add_symbol(lib, libsym);
 		}
 	}
 	return 0;
+}
+
+static void
+delete_symbol_chain(struct library_symbol *libsym)
+{
+	while (libsym != NULL) {
+		struct library_symbol *tmp = libsym->next;
+		library_symbol_destroy(libsym);
+		free(libsym);
+		libsym = tmp;
+	}
 }
 
 /* When -x rules result in request to trace several aliases, we only
@@ -614,9 +863,9 @@ symbol_with_address(struct library_symbol *sym, void *addrptr)
 }
 
 static int
-populate_this_symtab(struct Process *proc, const char *filename,
+populate_this_symtab(struct process *proc, const char *filename,
 		     struct ltelf *lte, struct library *lib,
-		     Elf_Data *symtab, const char *strtab, size_t size,
+		     Elf_Data *symtab, const char *strtab, size_t count,
 		     struct library_exported_name **names)
 {
 	/* If a valid NAMES is passed, we pass in *NAMES a list of
@@ -628,7 +877,7 @@ populate_this_symtab(struct Process *proc, const char *filename,
 	 * should be well enough for the number of symbols that we
 	 * typically deal with.  */
 	size_t num_symbols = 0;
-	struct unique_symbol *symbols = malloc(sizeof(*symbols) * size);
+	struct unique_symbol *symbols = malloc(sizeof(*symbols) * count);
 	if (symbols == NULL) {
 		fprintf(stderr, "couldn't insert symbols for -x: %s\n",
 			strerror(errno));
@@ -639,28 +888,26 @@ populate_this_symtab(struct Process *proc, const char *filename,
 	size_t i;
 	for (i = 1; i < lte->ehdr.e_shnum; ++i) {
 		Elf_Scn *scn = elf_getscn(lte->elf, i);
-		if (scn == NULL)
-			continue;
 		GElf_Shdr shdr;
-		if (gelf_getshdr(scn, &shdr) == NULL)
-			continue;
-		secflags[i] = shdr.sh_flags;
+		if (scn == NULL || gelf_getshdr(scn, &shdr) == NULL)
+			secflags[i] = 0;
+		else
+			secflags[i] = shdr.sh_flags;
 	}
 
-	for (i = 0; i < size; ++i) {
+	for (i = 0; i < count; ++i) {
 		GElf_Sym sym;
 		if (gelf_getsym(symtab, i, &sym) == NULL) {
-		fail:
 			fprintf(stderr,
 				"couldn't get symbol #%zd from %s: %s\n",
 				i, filename, elf_errmsg(-1));
 			continue;
 		}
 
-		/* XXX support IFUNC as well.  */
-		if (GELF_ST_TYPE(sym.st_info) != STT_FUNC
-		    || sym.st_value == 0
-		    || sym.st_shndx == STN_UNDEF)
+		if (sym.st_value == 0 || sym.st_shndx == STN_UNDEF
+		    /* Also ignore any special values besides direct
+		     * section references.  */
+		    || sym.st_shndx >= lte->ehdr.e_shnum)
 			continue;
 
 		/* Find symbol name and snip version.  */
@@ -674,14 +921,14 @@ populate_this_symtab(struct Process *proc, const char *filename,
 		name[len] = 0;
 
 		/* If we are interested in exports, store this name.  */
-		char *name_copy = NULL;
 		if (names != NULL) {
-			struct library_exported_name *export = NULL;
-			name_copy = strdup(name);
+			struct library_exported_name *export
+				= malloc(sizeof *export);
+			char *name_copy = strdup(name);
 
-			if (name_copy == NULL
-			    || (export = malloc(sizeof(*export))) == NULL) {
+			if (name_copy == NULL || export == NULL) {
 				free(name_copy);
+				free(export);
 				fprintf(stderr, "Couldn't store symbol %s.  "
 					"Tracing may be incomplete.\n", name);
 			} else {
@@ -714,42 +961,85 @@ populate_this_symtab(struct Process *proc, const char *filename,
 			continue;
 		}
 
-		char *full_name;
-		int own_full_name = 1;
-		if (name_copy == NULL) {
-			full_name = strdup(name);
-			if (full_name == NULL)
-				goto fail;
-		} else {
-			full_name = name_copy;
-			own_full_name = 0;
+		char *full_name = strdup(name);
+		if (full_name == NULL) {
+			fprintf(stderr, "couldn't copy name of %s@%s: %s\n",
+				name, lib->soname, strerror(errno));
+			continue;
 		}
 
-		/* Look whether we already have a symbol for this
-		 * address.  If not, add this one.  */
-		struct unique_symbol key = { naddr, NULL };
-		struct unique_symbol *unique
-			= lsearch(&key, symbols, &num_symbols,
-				  sizeof(*symbols), &unique_symbol_cmp);
+		struct library_symbol *libsym = NULL;
+		enum plt_status plts
+			= arch_elf_add_func_entry(proc, lte, &sym,
+						  naddr, full_name, &libsym);
+		if (plts == PLT_DEFAULT)
+			plts = os_elf_add_func_entry(proc, lte, &sym,
+						     naddr, full_name, &libsym);
 
-		if (unique->libsym == NULL) {
-			struct library_symbol *libsym = malloc(sizeof(*libsym));
-			if (libsym == NULL
-			    || library_symbol_init(libsym, naddr,
-						   full_name, own_full_name,
+		switch (plts) {
+		case PLT_DEFAULT:;
+			/* Put the default symbol to the chain.  */
+			struct library_symbol *tmp = malloc(sizeof *tmp);
+			if (tmp == NULL
+			    || library_symbol_init(tmp, naddr, full_name, 1,
 						   LS_TOPLT_NONE) < 0) {
-				--num_symbols;
-				goto fail;
+				free(tmp);
+
+				/* Either add the whole bunch, or none
+				 * of it.  Note that for PLT_FAIL we
+				 * don't do this--it's the callee's
+				 * job to clean up after itself before
+				 * it bails out.  */
+				delete_symbol_chain(libsym);
+				libsym = NULL;
+
+		case PLT_FAIL:
+				fprintf(stderr, "Couldn't add symbol %s@%s "
+					"for tracing.\n", name, lib->soname);
+
+				break;
 			}
-			unique->libsym = libsym;
-			unique->addr = naddr;
 
-		} else if (strlen(full_name) < strlen(unique->libsym->name)) {
-			library_symbol_set_name(unique->libsym,
-						full_name, own_full_name);
+			full_name = NULL;
+			tmp->next = libsym;
+			libsym = tmp;
+			break;
 
-		} else if (own_full_name) {
-			free(full_name);
+		case PLT_OK:
+			break;
+		}
+
+		free(full_name);
+
+		struct library_symbol *tmp;
+		for (tmp = libsym; tmp != NULL; ) {
+			/* Look whether we already have a symbol for
+			 * this address.  If not, add this one.  If
+			 * yes, look if we should pick the new symbol
+			 * name.  */
+
+			struct unique_symbol key = { tmp->enter_addr, NULL };
+			struct unique_symbol *unique
+				= lsearch(&key, symbols, &num_symbols,
+					  sizeof *symbols, &unique_symbol_cmp);
+
+			if (unique->libsym == NULL) {
+				unique->libsym = tmp;
+				unique->addr = tmp->enter_addr;
+				tmp = tmp->next;
+				unique->libsym->next = NULL;
+			} else {
+				if (strlen(tmp->name)
+				    < strlen(unique->libsym->name)) {
+					library_symbol_set_name
+						(unique->libsym, tmp->name, 1);
+					tmp->name = NULL;
+				}
+				struct library_symbol *next = tmp->next;
+				library_symbol_destroy(tmp);
+				free(tmp);
+				tmp = next;
+			}
 		}
 	}
 
@@ -777,7 +1067,7 @@ populate_this_symtab(struct Process *proc, const char *filename,
 }
 
 static int
-populate_symtab(struct Process *proc, const char *filename,
+populate_symtab(struct process *proc, const char *filename,
 		struct ltelf *lte, struct library *lib,
 		int symtabs, int exports)
 {
@@ -802,11 +1092,11 @@ populate_symtab(struct Process *proc, const char *filename,
 }
 
 static int
-read_module(struct library *lib, struct Process *proc,
+read_module(struct library *lib, struct process *proc,
 	    const char *filename, GElf_Addr bias, int main)
 {
-	struct ltelf lte = {};
-	if (open_elf(&lte, filename) < 0)
+	struct ltelf lte;
+	if (ltelf_init(&lte, filename) < 0)
 		return -1;
 
 	/* XXX When we abstract ABI into a module, this should instead
@@ -814,8 +1104,8 @@ read_module(struct library *lib, struct Process *proc,
 	 *
 	 *    proc->abi = arch_get_abi(lte.ehdr);
 	 *
-	 * The code in open_elf needs to be replaced by this logic.
-	 * Be warned that libltrace.c calls open_elf as well to
+	 * The code in ltelf_init needs to be replaced by this logic.
+	 * Be warned that libltrace.c calls ltelf_init as well to
 	 * determine whether ABI is supported.  This is to get
 	 * reasonable error messages when trying to run 64-bit binary
 	 * with 32-bit ltrace.  It is desirable to preserve this.  */
@@ -830,6 +1120,8 @@ read_module(struct library *lib, struct Process *proc,
 		if (process_get_entry(proc, &entry, NULL) < 0) {
 			fprintf(stderr, "Couldn't find entry of PIE %s\n",
 				filename);
+		fail:
+			ltelf_destroy(&lte);
 			return -1;
 		}
 		/* XXX The double cast should be removed when
@@ -854,26 +1146,25 @@ read_module(struct library *lib, struct Process *proc,
 			fprintf(stderr,
 				"Couldn't determine base address of %s\n",
 				filename);
-			return -1;
+			goto fail;
 		}
 	}
 
-	if (do_init_elf(&lte, filename) < 0)
-		return -1;
+	if (ltelf_read_elf(&lte, filename) < 0)
+		goto fail;
 
 	if (arch_elf_init(&lte, lib) < 0) {
 		fprintf(stderr, "Backend initialization failed.\n");
-		return -1;
+		goto fail;
 	}
 
-	int status = 0;
 	if (lib == NULL)
 		goto fail;
 
 	/* Note that we set soname and pathname as soon as they are
 	 * allocated, so in case of further errors, this get released
-	 * when LIB is release, which should happen in the caller when
-	 * we return error.  */
+	 * when LIB is released, which should happen in the caller
+	 * when we return error.  */
 
 	if (lib->pathname == NULL) {
 		char *pathname = strdup(filename);
@@ -888,8 +1179,10 @@ read_module(struct library *lib, struct Process *proc,
 			goto fail;
 		library_set_soname(lib, soname, 1);
 	} else {
-		const char *soname = rindex(lib->pathname, '/') + 1;
-		if (soname == NULL)
+		const char *soname = rindex(lib->pathname, '/');
+		if (soname != NULL)
+			soname += 1;
+		else
 			soname = lib->pathname;
 		library_set_soname(lib, soname, 0);
 	}
@@ -921,8 +1214,7 @@ read_module(struct library *lib, struct Process *proc,
 
 	int plts = filter_matches_library(options.plt_filter, lib);
 	if ((plts || options.export_filter != NULL)
-	    && populate_plt(proc, filename, &lte, lib,
-			    options.export_filter != NULL) < 0)
+	    && populate_plt(proc, filename, &lte, lib) < 0)
 		goto fail;
 
 	int exports = filter_matches_library(options.export_filter, lib);
@@ -932,17 +1224,13 @@ read_module(struct library *lib, struct Process *proc,
 			       symtabs, exports) < 0)
 		goto fail;
 
-done:
-	do_close_elf(&lte);
-	return status;
-
-fail:
-	status = -1;
-	goto done;
+	arch_elf_destroy(&lte);
+	ltelf_destroy(&lte);
+	return 0;
 }
 
 int
-ltelf_read_library(struct library *lib, struct Process *proc,
+ltelf_read_library(struct library *lib, struct process *proc,
 		   const char *filename, GElf_Addr bias)
 {
 	return read_module(lib, proc, filename, bias, 0);
@@ -950,12 +1238,13 @@ ltelf_read_library(struct library *lib, struct Process *proc,
 
 
 struct library *
-ltelf_read_main_binary(struct Process *proc, const char *path)
+ltelf_read_main_binary(struct process *proc, const char *path)
 {
 	struct library *lib = malloc(sizeof(*lib));
-	if (lib == NULL)
+	if (lib == NULL || library_init(lib, LT_LIBTYPE_MAIN) < 0) {
+		free(lib);
 		return NULL;
-	library_init(lib, LT_LIBTYPE_MAIN);
+	}
 	library_set_pathname(lib, path, 0);
 
 	/* There is a race between running the process and reading its
@@ -965,14 +1254,13 @@ ltelf_read_main_binary(struct Process *proc, const char *path)
 	 * that.  Presumably we could read the DSOs from the process
 	 * memory image, but that's not currently done.  */
 	char *fname = pid2name(proc->pid);
-	if (fname == NULL)
-		return NULL;
-	if (read_module(lib, proc, fname, 0, 1) < 0) {
+	if (fname == NULL
+	    || read_module(lib, proc, fname, 0, 1) < 0) {
 		library_destroy(lib);
 		free(lib);
-		return NULL;
+		lib = NULL;
 	}
-	free(fname);
 
+	free(fname);
 	return lib;
 }

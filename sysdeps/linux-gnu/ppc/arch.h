@@ -1,6 +1,6 @@
 /*
  * This file is part of ltrace.
- * Copyright (C) 2012 Petr Machata
+ * Copyright (C) 2012,2013 Petr Machata
  * Copyright (C) 2006 Paul Gilliam
  * Copyright (C) 2002,2004 Juan Cespedes
  *
@@ -37,8 +37,9 @@
 #define ARCH_SUPPORTS_OPD
 #endif
 
-#define ARCH_HAVE_ATOMIC_SINGLESTEP
+#define ARCH_HAVE_SW_SINGLESTEP
 #define ARCH_HAVE_ADD_PLT_ENTRY
+#define ARCH_HAVE_ADD_FUNC_ENTRY
 #define ARCH_HAVE_TRANSLATE_ADDRESS
 #define ARCH_HAVE_DYNLINK_DONE
 #define ARCH_HAVE_FETCH_ARG
@@ -56,6 +57,9 @@ struct arch_ltelf_data {
 	GElf_Addr opd_base;
 	GElf_Xword opd_size;
 	int secure_plt;
+
+	Elf_Data *reladyn;
+	size_t reladyn_count;
 };
 
 #define ARCH_HAVE_LIBRARY_DATA
@@ -79,6 +83,10 @@ enum ppc64_plt_type {
 	 * corresponding PLT entry.  The original is now saved in
 	 * RESOLVED_VALUE.  */
 	PPC_PLT_RESOLVED,
+
+	/* Very similar to PPC_PLT_UNRESOLVED, but for JMP_IREL
+	 * slots.  */
+	PPC_PLT_IRELATIVE,
 };
 
 #define ARCH_HAVE_LIBRARY_SYMBOL_DATA
@@ -92,7 +100,10 @@ struct arch_library_symbol_data {
 
 #define ARCH_HAVE_BREAKPOINT_DATA
 struct arch_breakpoint_data {
-	/* We need this just for arch_breakpoint_init.  */
+	/* This is where we hide symbol for IRELATIVE breakpoint for
+	 * the first time that it hits.  This is NULL for normal
+	 * breakpoints.  */
+	struct library_symbol *irel_libsym;
 };
 
 #define ARCH_HAVE_PROCESS_DATA

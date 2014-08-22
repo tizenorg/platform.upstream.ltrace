@@ -1,5 +1,6 @@
 /*
  * This file is part of ltrace.
+ * Copyright (C) 2013 Petr Machata, Red Hat Inc.
  * Copyright (C) 2002,2008,2009 Juan Cespedes
  * Copyright (C) 2009 Juan Cespedes
  * Copyright (C) 2008 Luis Machado, IBM Corporation
@@ -40,35 +41,26 @@
 #endif
 
 void *
-get_instruction_pointer(Process *proc) {
+get_instruction_pointer(struct process *proc)
+{
 	return (void *)ptrace(PTRACE_PEEKUSER, proc->pid, sizeof(long)*PT_NIP, 0);
 }
 
 void
-set_instruction_pointer(Process *proc, void *addr)
+set_instruction_pointer(struct process *proc, void *addr)
 {
 	if (ptrace(PTRACE_POKEUSER, proc->pid, sizeof(long)*PT_NIP, addr) != 0)
 		error(0, errno, "set_instruction_pointer");
 }
 
 void *
-get_stack_pointer(Process *proc) {
+get_stack_pointer(struct process *proc)
+{
 	return (void *)ptrace(PTRACE_PEEKUSER, proc->pid, sizeof(long)*PT_R1, 0);
 }
 
 void *
-get_return_addr(Process *proc, void *stack_pointer) {
+get_return_addr(struct process *proc, void *stack_pointer)
+{
 	return (void *)ptrace(PTRACE_PEEKUSER, proc->pid, sizeof(long)*PT_LNK, 0);
-}
-
-void
-set_return_addr(Process *proc, void *addr) {
-	ptrace(PTRACE_POKEUSER, proc->pid, sizeof(long)*PT_LNK, addr);
-}
-
-/* Grab the value of CTR registers.  */
-void *
-get_count_register (Process *proc) {
-	return (void *) ptrace (PTRACE_PEEKUSER, proc->pid,
-				sizeof (long) * PT_CTR, 0);
 }
