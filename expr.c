@@ -229,18 +229,22 @@ expr_clone(struct expr_node *retp, const struct expr_node *node)
 					 node->u.call.own_rhs) < 0)
 			return -1;
 		retp->u.call.rhs = nrhs;
-		/* Fall through.  */
+
+		if (expr_alloc_and_clone(&nlhs, node->lhs, node->own_lhs) < 0) {
+			if (node->u.call.own_rhs) {
+				expr_destroy(nrhs);
+				free(nrhs);
+			}
+			return -1;
+		}
+
+		retp->lhs = nlhs;
+		return 0;
 
 	case EXPR_OP_UP:
 	case EXPR_OP_CALL1:
-		if (expr_alloc_and_clone(&nlhs, node->lhs, node->own_lhs) < 0) {
-			if (node->kind == EXPR_OP_CALL2
-			    && node->u.call.own_rhs) {
-				expr_destroy(nrhs);
-				free(nrhs);
-				return -1;
-			}
-		}
+		if (expr_alloc_and_clone(&nlhs, node->lhs, node->own_lhs) < 0)
+			return -1;
 
 		retp->lhs = nlhs;
 		return 0;
