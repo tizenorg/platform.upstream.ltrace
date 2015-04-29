@@ -30,7 +30,7 @@ child processes may fail or some things may not work as expected.
 cp %{SOURCE1001} .
 
 %build
-export CFLAGS="%{optflags} -Wall -Wno-unused-local-typedefs"
+export CFLAGS="%{optflags} -Wall -Wno-unused-local-typedefs -Wno-error=maybe-uninitialized"
 ./autogen.sh
 %configure --build=%{_target_cpu}-tizen-linux
 make
